@@ -73,6 +73,17 @@ def test_www_when_the_plain_domain_fails() -> None:
     assert r.found is not None and r.found.url == "https://www.shop.it/"
 
 
+def test_real_mistakes_from_the_first_real_run() -> None:
+    portal = "https://privacyportal-de.onetrust.com/webform/abc"
+    home = f'<a href="{portal}">Privacy requests</a>' + PAD
+    r = finder.walk("shop.it", "Shop", site({"https://shop.it/": home}), None)  # Just Eat, eDreams
+    assert r.status == "webform" and r.found is not None and r.found.webform == portal
+    assert finder.privacy_email('<p>Generitech Privacy, 123 Main Street, emailprivacy@generitech.com</p>', "u", "shop.it") is None
+    dsa = "Pursuant to Article 11 of the DSA, Shop has designated legal@shop.it as its Point of Contact for authorities."
+    pages = {"https://shop.it/": f"<p>{dsa}</p>" + PAD}  # Hinge
+    assert finder.walk("shop.it", "Shop", site(pages), answer("legal@shop.it", dsa)).found is None
+
+
 def test_model_sees_clean_links_and_cannot_invent_one() -> None:
     prompts: list[str] = []
     visited: list[str] = []
@@ -103,7 +114,7 @@ def test_off_site_links() -> None:
 def test_webform() -> None:
     home = '<a href="https://privacyportal-de.onetrust.com/webform/abc">Send a data request</a>' + PAD
     r = finder.walk("shop.it", "Shop", site({"https://shop.it/": home}), answer(form=1))
-    assert r.found is not None and r.status == "webform" and r.found.webform.endswith("/webform/abc")
+    assert r.found is not None and r.status == "webform" and r.found.webform.endswith("/webform/abc") and r.how == "found"
     plain = '<a href="https://shop.it/privacy">Privacy</a>' + PAD
     assert finder.walk("shop.it", "Shop", site({"https://shop.it/": plain}), answer(form=1)).status == "nothing"  # not a form
     contact = '<a href="https://shop.it/kontakt/kontaktformular">Kontaktformular</a>' + PAD

@@ -31,8 +31,11 @@ PRIVACY_PAGE = re.compile(r"privacy|datenschutz|privacidad|confidentialit|inform
 MORE_PAGES = re.compile(r"contact|kontakt|contatt|impressum|imprint|legal|legali|help|support|aiuto|hilfe|data.?request|rights|diritti|rechte", re.I)
 PRIVACY_BOX = re.compile(r"privacy|dpo|datenschutz|gdpr|rgpd|dsgvo|data.?protection|dataprotect|privacidad|protezione|dsb", re.I)
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}", re.I)
-# An address for another law's users (Hinge: "If you are located in Brazil ... dpobrazil@hinge.co") is not ours.
-OTHER_LAW = re.compile(r"brazil|brasil|lgpd|california|ccpa|canad|australia|japan|korea|china|india", re.I)
+# An address for another law's users (Hinge: "If you are located in Brazil ... dpobrazil@hinge.co") is not ours,
+# nor one for authorities (Hinge: "Article 11 of the DSA ... Point of Contact for Member State authorities").
+OTHER_LAW = re.compile(r"brazil|brasil|lgpd|california|ccpa|canad|australia|japan|korea|china|india|\bdsa\b|digital services act", re.I)
+# Sample text in privacy portal pages ("Generitech Privacy, 123 Main Street"), not anyone's address.
+PLACEHOLDER = re.compile(r"generitech|@example\.|@(?:your)?(?:company|domain)\.", re.I)
 PORTAL = re.compile(r"onetrust|trustarc|privacy-?portal|transcend|securiti|datagrail|ketch|^privacy\.", re.I)
 WEBFORM = re.compile(r"\bform\b|webform|formular|modulo|portal|request|richiesta|anfrage|onetrust|trustarc", re.I)
 BOT_WALL = re.compile(r"just a moment|verify you are human|are you human|attention required|access denied|captcha", re.I)
@@ -127,7 +130,7 @@ def _hits(text: str, url: str) -> list[Found]:
     out = []
     for m in EMAIL.finditer(text):
         quote = re.sub(r"<[^>]+>|\s+", " ", text[max(0, m.start() - 120): m.end() + 60]).strip()
-        if PRIVACY_BOX.search(m.group().split("@")[0]) and not OTHER_LAW.search(quote):
+        if PRIVACY_BOX.search(m.group().split("@")[0]) and not OTHER_LAW.search(quote) and not PLACEHOLDER.search(m.group()):
             out.append(Found(m.group().lower().rstrip("."), url, quote))
     return out
 
@@ -189,7 +192,8 @@ def _pick(n: Any, links: list[tuple[str, str]]) -> str:
 def _proven(address: str, quote: str, text: str, site: str) -> bool:
     """The evidence rule: the address sits inside a sentence found word for word on the page."""
     return (EMAIL.fullmatch(address) is not None and address in quote.lower() and verified(quote, text)
-            and not OTHER_LAW.search(quote) and (site in PLATFORMS or registrable(address.split("@")[1]) not in PLATFORMS))
+            and not OTHER_LAW.search(quote) and not PLACEHOLDER.search(address)
+            and (site in PLATFORMS or registrable(address.split("@")[1]) not in PLATFORMS))
 
 
 def _consult(company: str, url: str, html: str, links: list[tuple[str, str]], site: str, ask: Ask) -> tuple[Found | None, str]:
@@ -251,6 +255,8 @@ def _walk(site: str, company: str, read: Read, ask: Ask | None, domains: set[str
         if url in seen:
             continue
         seen.add(url)
+        if PORTAL.search(_host(url)) and WEBFORM.search(url):  # a privacy portal's request form: that is the contact
+            return Lookup("webform", Found("", url, url, webform=url), [*pages, url])
         try:
             html = read(url)
         except Refused:
