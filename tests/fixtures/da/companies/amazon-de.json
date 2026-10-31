@@ -1,0 +1,16 @@
+{
+  "slug": "amazon-de",
+  "relevant-countries": [
+    "de",
+    "at"
+  ],
+  "name": "Amazon Europe Core SARL",
+  "runs": [
+    "amazon.de",
+    "amazon.at"
+  ],
+  "email": "eu-privacy@amazon.de",
+  "web": "https://www.amazon.de",
+  "address": "Marcel-Breuer-Str. 12\nMünchen",
+  "quality": "verified"
+}

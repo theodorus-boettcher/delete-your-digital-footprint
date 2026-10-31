@@ -1,0 +1,18 @@
+{
+  "slug": "shop-uk",
+  "relevant-countries": [
+    "gb"
+  ],
+  "name": "Shop Ltd",
+  "address": "1 High St\nLondon",
+  "email": "privacy@shop.co.uk",
+  "web": "https://www.shop.co.uk",
+  "suggested-transport-medium": "email",
+  "required-elements": [
+    {
+      "desc": "Customer number",
+      "type": "input"
+    }
+  ],
+  "quality": "verified"
+}

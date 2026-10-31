@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+
+# your mail, exports, letters and the database never go in git
+data/
+.env

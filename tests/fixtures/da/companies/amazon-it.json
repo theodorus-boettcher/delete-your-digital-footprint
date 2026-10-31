@@ -1,0 +1,14 @@
+{
+  "slug": "amazon-it",
+  "relevant-countries": [
+    "it"
+  ],
+  "name": "Amazon Italia",
+  "email": "privacy@amazon.it",
+  "web": "https://www.amazon.it",
+  "runs": [
+    "amazon.de"
+  ],
+  "address": "Viale Monte Grappa 3/5\nMilano",
+  "quality": "verified"
+}

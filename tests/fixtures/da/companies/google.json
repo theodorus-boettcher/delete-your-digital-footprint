@@ -1,0 +1,31 @@
+{
+  "slug": "google",
+  "relevant-countries": [
+    "all"
+  ],
+  "name": "Google LLC",
+  "runs": [
+    "Gmail",
+    "YouTube",
+    "Google Maps"
+  ],
+  "address": "1600 Amphitheatre Pkwy\nMountain View",
+  "email": "data-access-requests@google.com",
+  "webform": "https://takeout.google.com/",
+  "web": "https://www.google.com/",
+  "sources": [
+    "https://policies.google.com/privacy"
+  ],
+  "required-elements": [
+    {
+      "desc": "Name",
+      "type": "name"
+    },
+    {
+      "desc": "E-Mail",
+      "type": "email"
+    }
+  ],
+  "suggested-transport-medium": "webform",
+  "quality": "verified"
+}

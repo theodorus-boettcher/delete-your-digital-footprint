@@ -1,0 +1,13 @@
+{
+  "slug": "facebook",
+  "relevant-countries": [
+    "all"
+  ],
+  "name": "Meta Platforms Ireland Limited",
+  "runs": [
+    "Facebook",
+    "Threads"
+  ],
+  "web": "https://www.facebook.com/",
+  "quality": "verified"
+}

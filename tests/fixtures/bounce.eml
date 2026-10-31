@@ -1,0 +1,18 @@
+From: Mail Delivery Subsystem <mailer-daemon@googlemail.com>
+To: me@example.org
+Subject: Delivery Status Notification (Failure)
+Date: Mon, 02 Nov 2026 10:00:00 +0000
+Message-ID: <bounce1@mx.google.com>
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+Address not found. Your message wasn't delivered to privacy@shop.co.uk.
+--b1
+Content-Type: message/delivery-status
+
+Action: failed
+Status: 5.1.1
+--b1--

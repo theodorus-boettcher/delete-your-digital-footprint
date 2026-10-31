@@ -1,0 +1,36 @@
+[project]
+name = "art15"
+version = "0.1.0"
+description = "An agent that gets your data back from companies: GDPR Art. 15 requests, deadlines, replies and an audit of what came back."
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4",
+    "httpx",
+    "pymupdf",
+    "tldextract",
+]
+
+[project.scripts]
+art15 = "art15.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "mypy",
+    "types-beautifulsoup4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.mypy]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[[tool.mypy.overrides]]
+# These ship no type information.
+module = ["fitz", "pymupdf"]
+ignore_missing_imports = true
