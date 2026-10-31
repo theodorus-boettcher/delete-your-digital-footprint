@@ -54,7 +54,7 @@ WRONG_BOX = re.compile(r"security|abuse|sales|sponsor|marketing|press|jobs|caree
 PORTAL = re.compile(r"onetrust|trustarc|privacy-?portal|transcend|securiti|datagrail|ketch|^privacy\.", re.I)
 WEBFORM = re.compile(r"\bform\b|webform|formular|modulo|portal|request|richiesta|anfrage|onetrust|trustarc", re.I)
 # A link that says it is the way to make a data request, wherever it lives.
-FORM_LINK = re.compile(r"privacy.{0,30}(?:request|form|portal|choices)|(?:request|form).{0,30}privacy|data.{0,10}(?:request|subject)|dsar|"
+FORM_LINK = re.compile(r"privacy.{0,30}(?:\brequest|\bform\b|\bportal|\bchoices)|(?:\brequest|\bform\b).{0,30}privacy|data.{0,10}(?:\brequest|\bsubject)|dsar|"
                        r"datenanfrage|datenauskunft|richiesta.{0,20}(?:dati|privacy)|exercise.{0,20}rights|demande.{0,20}donn", re.I)
 BOT_WALL = re.compile(r"just a moment|verify you are human|are you human|attention required|access denied|captcha", re.I)
 # Policies name these as third parties. Their addresses and pages are about them, not about the company we look for.

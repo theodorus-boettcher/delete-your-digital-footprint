@@ -187,6 +187,12 @@ def test_a_privacy_form_anywhere_counts_but_an_address_wins() -> None:
     assert finder.walk("shop.it", "Shop", site({"https://shop.it/": home}), answer()).status == "webform"  # the model adds nothing, the form stays
 
 
+def test_ordinary_privacy_pages_are_not_forms() -> None:
+    for text in ("Informativa privacy", "Privacy information", "Privacy policy and more information"):
+        home = f'<a href="https://shop.it/page">{text}</a>' + PAD
+        assert finder.walk("shop.it", "Shop", site({"https://shop.it/": home}), None).status == "nothing"
+
+
 def test_a_dead_site_costs_two_tries() -> None:
     tried: list[str] = []
 
