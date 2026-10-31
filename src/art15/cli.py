@@ -66,19 +66,8 @@ class Ctx:
         self.env = load_env(HOME / ".env")
         self.today: date = args.now or date.today()
         self.con = db.connect(DATA / "art15.db")
-        self.ask = llm.make_ask(self.env, args.allow_cloud)
-        self.decide: llm.Decide | None = None
-        if args.jev:
-            if "ART15_JEV_KEY" not in self.env:
-                sys.exit("--jev needs ART15_JEV_KEY in .env (an OpenRouter or TypeSafe key).")
-            self.decide = llm.make_decide(self.env)
-        self.threshold = float(self.env.get("ART15_JEV_THRESHOLD", "0.8"))
+        self.ask = llm.make_ask(self.env)
         self._companies: Companies | None = None
-
-    @property
-    def private(self) -> list[str]:
-        """Your name and address, masked in anything sent to Jev."""
-        return [v for k in ("ART15_NAME", "ART15_EMAIL") if (v := self.env.get(k))]
 
     @property
     def companies(self) -> Companies:
@@ -149,13 +138,6 @@ def cmd_setup(ctx: Ctx, args: argparse.Namespace) -> None:
         imap.logout()
     except (imaplib.IMAP4.error, OSError, LookupError) as e:
         print(f"IMAP: failed ({e}). Check the app password and that IMAP is on in Gmail settings.")
-
-    if "ART15_JEV_KEY" in ctx.env:
-        try:
-            d = llm.make_decide(ctx.env)("This is a test message.", {"t": ("Is this a test?", {"yes": "it is a test", "no": "it is not"})})["t"]
-            print(f"Jev: ok ({ctx.env.get('ART15_JEV_MODEL', llm.JEV_MODEL)} answered {d.choice}, p={d.p:.2f})")
-        except (httpx.HTTPError, KeyError, ValueError) as e:
-            print(f"Jev: failed ({e}). Check ART15_JEV_KEY / ART15_JEV_URL.")
 
     try:
         have = llm.models()
@@ -394,8 +376,7 @@ def apply_reply(ctx: Ctx, imap: imaplib.IMAP4 | None, req: sqlite3.Row, msg: Mes
                  "refusal": "refused"}.get(r.label)
     if to_status is None:
         if r.pick not in {"other", r.label}:  # the checks overruled the model
-            print(f"{ref}: a reply needs you ({r.backend} said {r.pick}"
-                  + (f", p={r.confidence:.2f})" if r.confidence is not None else ")"))
+            print(f"{ref}: a reply needs you ({r.backend} said {r.pick})")
         return
     fields: dict[str, object] = {}
     if r.label == "extension":
@@ -458,7 +439,7 @@ def cmd_sync(ctx: Ctx, args: argparse.Namespace) -> None:
                 continue
             if ref not in mail.header(msg, "Subject") and is_bulk(msg):
                 continue  # newsletters from the same company
-            r = classify(msg, ctx.ask, ctx.decide, ctx.threshold, ctx.private)
+            r = classify(msg, ctx.ask)
             folder = DATA / "mail" / ref
             folder.mkdir(parents=True, exist_ok=True)
             path = folder / f"{len(list(folder.glob('*.eml'))) + 1:03d}.eml"
@@ -468,10 +449,10 @@ def cmd_sync(ctx: Ctx, args: argparse.Namespace) -> None:
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(payload)
                 print(f"{ref}: saved {out.relative_to(HOME)}")
-            ctx.con.execute("INSERT INTO messages (message_id, ref, date, from_addr, subject, label, quote, path, confidence, "
-                            "backend) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ctx.con.execute("INSERT INTO messages (message_id, ref, date, from_addr, subject, label, quote, path, backend) "
+                            "VALUES (?,?,?,?,?,?,?,?,?)",
                             (mid, ref, (mail.msg_date(msg) or datetime.now()).date().isoformat(), mail.header(msg, "From"),
-                             mail.header(msg, "Subject"), r.label, r.quote, str(path.relative_to(HOME)), r.confidence, r.backend))
+                             mail.header(msg, "Subject"), r.label, r.quote, str(path.relative_to(HOME)), r.backend))
             ctx.con.commit()
             apply_reply(ctx, imap, ctx.con.execute("SELECT * FROM requests WHERE ref = ?", (ref,)).fetchone(), msg, r)
 
@@ -561,7 +542,7 @@ def cmd_audit(ctx: Ctx, args: argparse.Namespace) -> None:
 
     ask = None if args.no_llm else ctx.ask
     items = audit.inventory(roots, None if args.no_llm else ocr)
-    audit.categorize(items, ask, None if args.no_llm else ctx.decide)
+    audit.categorize(items, ask)
     letter = "\n\n".join(mail.body_text(mail.load(HOME / r["path"]))
                          for r in ctx.con.execute("SELECT path FROM messages WHERE ref = ?", (ref,)))
     findings = audit.checklist(items, letter, ask)
@@ -606,42 +587,25 @@ def eval_replies(ctx: Ctx, labels: Path) -> None:
         evals.write_template(labels, ["message_id", "label", "from", "subject"],
                              [[r["message_id"], "", r["from_addr"], r["subject"]] for r in rows])
         print(f"Wrote {labels} with {len(rows)} replies. Read each one (data/mail/) and fill in `label` with one of: "
-              f"{', '.join([*LABELS, 'bounce'])}. Then run this again (add --jev to compare with Jev).")
+              f"{', '.join([*LABELS, 'bounce'])}. Then run this again.")
         return
     truth = evals.read_labels(labels, "message_id", "label")
-    backends: dict[str, llm.Decide | None] = {"local": None} | ({"jev": ctx.decide} if ctx.decide else {})
-    results: dict[str, list[evals.Row]] = {b: [] for b in backends}
+    results: list[evals.Row] = []
     for r in rows:
         if r["message_id"] not in truth:
             continue
-        msg = mail.load(HOME / r["path"])
-        for b, decide in backends.items():
-            t0 = time.perf_counter()
-            rep = classify(msg, ctx.ask, decide, ctx.threshold, ctx.private)
-            results[b].append(evals.Row(r["message_id"], truth[r["message_id"]], rep.pick, rep.label, rep.confidence,
-                                        time.perf_counter() - t0))
-    head = ["backend", "replies", "model right", "sent to you", "right when not sent to you", "s/reply"]
-    lines = []
-    for b, rs in results.items():
-        m = evals.summary(rs)
-        lines.append([b, str(int(m["n"])), f"{m['raw_accuracy']:.0%}", f"{m['to_user']:.0%}", f"{m['auto_accuracy']:.0%}",
-                      f"{m['seconds']:.2f}"])
-    html = "<h1>Reply labels: local model vs Jev</h1>" + evals.table(head, lines)
+        t0 = time.perf_counter()
+        rep = classify(mail.load(HOME / r["path"]), ctx.ask)
+        results.append(evals.Row(r["message_id"], truth[r["message_id"]], rep.pick, rep.label, time.perf_counter() - t0))
+    head = ["replies", "model right", "sent to you", "right when not sent to you", "s/reply"]
+    m = evals.summary(results)
+    lines = [[str(int(m["n"])), f"{m['raw_accuracy']:.0%}", f"{m['to_user']:.0%}", f"{m['auto_accuracy']:.0%}", f"{m['seconds']:.2f}"]]
+    html = "<h1>Reply labels</h1>" + evals.table(head, lines)
     print(evals.text_table(head, lines))
-    if "jev" in results:
-        cal = [[b, str(n), f"{acc:.0%}"] for b, n, acc in evals.calibration(results["jev"])]
-        thr = [[f"{t:.1f}", f"{kept:.0%}", f"{acc:.0%}"] for t, kept, acc in evals.thresholds(results["jev"])]
-        cost = f"Jev usage: {llm.usage.get('input_tokens', 0)} input tokens, ${llm.usage.get('cost', 0):.4f}"
-        print(f"\nJev calibration\n{evals.text_table(['probability', 'replies', 'right'], cal)}")
-        print(f"\nJev threshold\n{evals.text_table(['threshold', 'labelled for you', 'right'], thr)}\n{cost}")
-        html += ("<h2>Is Jev's probability honest?</h2>" + evals.table(["probability", "replies", "right"], cal)
-                 + "<h2>Threshold</h2>" + evals.table(["threshold", "labelled automatically", "right"], thr) + f"<p>{cost}</p>")
-    by_key = {b: {x.key: x for x in rs} for b, rs in results.items()}
-    wrong = [[k[:40], row.truth, *(by_key[b][k].pick for b in results)]
-             for k, row in by_key["local"].items() if any(by_key[b][k].pick != row.truth for b in results)]
+    wrong = [[x.key[:40], x.truth, x.pick] for x in results if x.pick != x.truth]
     if wrong:
-        print(f"\nMistakes\n{evals.text_table(['message', 'truth', *results], wrong)}")
-        html += "<h2>Mistakes</h2>" + evals.table(["message", "truth", *results], wrong)
+        print(f"\nMistakes\n{evals.text_table(['message', 'truth', 'model'], wrong)}")
+        html += "<h2>Mistakes</h2>" + evals.table(["message", "truth", "model"], wrong)
     out = DATA / "report" / "eval.html"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report.page("art15 eval", html))
@@ -654,7 +618,7 @@ def eval_fields(ctx: Ctx, labels: Path) -> None:
         names = sorted({f for it in audit.inventory(roots) for f in it.fields})
         evals.write_template(labels, ["field", "category"], [[n, ""] for n in names])
         print(f"Wrote {labels} with {len(names)} field names from your exports. Fill in `category` with one of: "
-              f"{', '.join(audit.CATEGORY_TEXT)}. Then run this again (add --jev to compare with Jev).")
+              f"{', '.join(audit.CATEGORY_TEXT)}. Then run this again.")
         return
     truth = evals.read_labels(labels, "field", "category")
     names = sorted(truth)
@@ -662,15 +626,13 @@ def eval_fields(ctx: Ctx, labels: Path) -> None:
     covered = [n for n in names if rules[n]]
     head = ["method", "fields labelled", "right", "seconds"]
     lines = [["keyword rules", f"{len(covered)}/{len(names)}", f"{sum(rules[n] == truth[n] for n in covered) / (len(covered) or 1):.0%}", "0"]]
-    backends: dict[str, llm.Decide | None] = {"local model": None} | ({"jev": ctx.decide} if ctx.decide else {})
-    for b, decide in backends.items():
-        t0 = time.perf_counter()
-        got = audit.model_categories(names, ctx.ask, decide)
-        secs = time.perf_counter() - t0
-        lines.append([b, f"{len(got)}/{len(names)}", f"{sum(got.get(n) == truth[n] for n in names) / len(names):.0%}", f"{secs:.1f}"])
-        both = {n: rules[n] or got.get(n) for n in names}
-        lines.append([f"rules, then {b}", f"{sum(1 for v in both.values() if v)}/{len(names)}",
-                      f"{sum(both[n] == truth[n] for n in names) / len(names):.0%}", f"{secs:.1f}"])
+    t0 = time.perf_counter()
+    got = audit.model_categories(names, ctx.ask)
+    secs = time.perf_counter() - t0
+    lines.append(["local model", f"{len(got)}/{len(names)}", f"{sum(got.get(n) == truth[n] for n in names) / len(names):.0%}", f"{secs:.1f}"])
+    both = {n: rules[n] or got.get(n) for n in names}
+    lines.append(["rules, then local model", f"{sum(1 for v in both.values() if v)}/{len(names)}",
+                  f"{sum(both[n] == truth[n] for n in names) / len(names):.0%}", f"{secs:.1f}"])
     print(evals.text_table(head, lines))
     out = DATA / "report" / "eval-fields.html"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -708,9 +670,6 @@ def cmd_mark(ctx: Ctx, args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="art15", description="Get your data back from companies (GDPR Art. 15).")
     p.add_argument("--now", type=date.fromisoformat, help="pretend today is this date (YYYY-MM-DD), for dry runs")
-    p.add_argument("--allow-cloud", action="store_true", help="use the cloud model from .env instead of the local one")
-    p.add_argument("--jev", action="store_true",
-                   help="use Jev (cloud) to label replies (redacted) and export fields (names only)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup", help="get company data, check mail login and models").set_defaults(fn=cmd_setup)
     s = sub.add_parser("scan", help="find companies in your mail (headers only)")
@@ -733,7 +692,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--no-policy", action="store_true")
     s.add_argument("--no-llm", action="store_true", help="rules only, no model")
     s.set_defaults(fn=cmd_audit)
-    s = sub.add_parser("eval", help="local model vs Jev on replies or field names you labelled by hand")
+    s = sub.add_parser("eval", help="the local model on replies or field names you labelled by hand")
     s.add_argument("what", choices=["replies", "fields"])
     s.add_argument("--labels", help="the CSV with your labels (default data/labels.csv or data/field_labels.csv)")
     s.set_defaults(fn=cmd_eval)

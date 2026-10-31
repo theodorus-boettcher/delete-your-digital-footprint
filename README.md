@@ -30,8 +30,9 @@ your mailbox (headers only)
   "the policy says it collects your location; the export has no location data".
 - **Every claim has evidence.** A finding that says something is there carries a sentence copied word for word
   from a named file, or it is dropped. A small local model cannot make up a compliant answer.
-- **It stays on your laptop.** The model runs locally (Ollama). The scan reads only From, Date and Subject.
-  Nothing is ever sent by the tool: it writes drafts, you read them and press Send.
+- **No cloud AI.** The model runs on your own machine (Ollama), and your mail is never sent to any AI service. The
+  scan reads only From, Date and Subject. art15 connects to your mailbox, the datenanfragen data and company websites,
+  nothing else. Nothing is ever sent by the tool: it writes drafts, you read them and press Send.
 - **It never sends ID documents.** When a company asks for one, art15 drafts a reply citing Art. 12(6): the
   request came from the email address registered with the account.
 
@@ -53,26 +54,11 @@ uv run art15 audit google --export ~/Downloads/takeout.zip
 uv run art15 report         # data/report/index.html
 ```
 
-### Optional: Jev
-
-With `--jev`, two jobs where the model only picks from a list go to [Jev](https://openrouter.ai/blog/insights/what-is-jev/)
-(TypeSafe AI) instead of the local model:
-
-- **labelling replies**: Jev returns a probability per label; under `ART15_JEV_THRESHOLD` (0.8) the reply is left
-  for you to read. Before sending, art15 removes email addresses, links (only the domain stays), long numbers,
-  lines that mention a password or code, your name and your address, and sends attachment types, not names.
-- **sorting export fields into categories**: only field names are sent, never values.
-
-Jev runs in the US. It is off unless you pass `--jev`. Put an OpenRouter key (or a TypeSafe key, see
-`.env.example`) in `ART15_JEV_KEY`.
-
-`art15 eval replies` and `art15 eval fields` compare the local model with Jev (add `--jev`) on replies and field
-names you label by hand: accuracy, how many replies go to you, speed, cost, and whether Jev's probabilities are
-honest (per probability bucket, how often it was right).
+`art15 eval replies` and `art15 eval fields` measure the local model on replies and field names you label by hand:
+accuracy, how many replies go to you, and speed.
 
 `art15 status` lists every request, `art15 mark <ref> sent` records a request you sent through a web form,
-`--now 2026-12-03` pretends today is another day (for dry runs), `--allow-cloud` uses the cloud model
-configured in `.env` instead of the local one.
+`--now 2026-12-03` pretends today is another day (for dry runs).
 
 ## Limits
 

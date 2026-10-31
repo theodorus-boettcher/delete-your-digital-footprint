@@ -5,9 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from art15 import db, mail
+from art15 import db, evals, mail
 from art15.classify import classify, is_bounce
 from art15.companies import Companies, registrable
+from art15.llm import Ask
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -88,3 +89,34 @@ def test_transitions() -> None:
     assert (row["status"], row["sent_at"], row["extended"]) == ("extended", "2026-11-02", 1)
     with pytest.raises(KeyError):
         db.set_status(con, "nope", "sent")
+
+
+def reply(body: str, attachment: bool = False) -> EmailMessage:
+    msg = EmailMessage()
+    msg["From"], msg["Subject"] = "privacy@shop.co.uk", "Re: request [art15-abcd]"
+    msg.set_content(body)
+    if attachment:
+        msg.add_attachment(b"PK", maintype="application", subtype="zip", filename="data.zip")
+    return msg
+
+
+def test_classify_checks() -> None:
+    def ask(label: str, quote: str) -> Ask:
+        return lambda prompt, schema: {"label": label, "quote": quote}
+
+    ack = "We have received your request."
+    assert classify(reply(ack), ask("acknowledged", ack)).label == "acknowledged"
+    made_up = classify(reply(ack), ask("data_delivered", "Your data is attached."))
+    assert (made_up.label, made_up.pick) == ("other", "data_delivered")  # the quote is not in the reply
+    assert classify(reply(ack), ask("data_delivered", ack)).label == "other"  # no attachment and no link
+    data = "Please find your data attached."
+    assert classify(reply(data, attachment=True), ask("data_delivered", data)).label == "data_delivered"
+
+
+def test_eval_metrics() -> None:
+    rows = [evals.Row("1", "acknowledged", "acknowledged", "acknowledged"),
+            evals.Row("2", "refusal", "acknowledged", "other"),  # sent to the user
+            evals.Row("3", "data_delivered", "data_delivered", "data_delivered"),
+            evals.Row("4", "extension", "acknowledged", "acknowledged")]
+    m = evals.summary(rows)
+    assert (m["raw_accuracy"], m["to_user"]) == (0.5, 0.25) and round(m["auto_accuracy"], 2) == 0.67

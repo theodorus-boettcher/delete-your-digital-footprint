@@ -74,10 +74,9 @@ def build(con: sqlite3.Connection, companies: Companies, out: Path, today: date)
         if fs:
             (out / f"{r['ref']}.html").write_text(audit_page(name, r["ref"], fs))
             link = f"<a href='{r['ref']}.html'>{escape(name)}</a>"
-        last = con.execute("SELECT label, confidence FROM messages WHERE ref = ? ORDER BY date DESC, rowid DESC",
+        last = con.execute("SELECT label FROM messages WHERE ref = ? ORDER BY date DESC, rowid DESC",
                            (r["ref"],)).fetchone()
-        reply = "" if last is None else last["label"].replace("_", " ") + (
-            f" <span class=muted>{last['confidence']:.2f}</span>" if last["confidence"] is not None else "")
+        reply = "" if last is None else last["label"].replace("_", " ")
         rows.append(f"<tr><td>{link}</td><td class={r['status']}>{r['status'].replace('_', ' ')}</td><td>{reply}</td>"
                     f"<td>{r['sent_at'] or ''}</td><td>{r['deadline'] or ''}</td>"
                     f"<td>{'' if days is None or r['status'] not in {'sent', 'acknowledged', 'id_requested', 'extended'} else days}</td>"

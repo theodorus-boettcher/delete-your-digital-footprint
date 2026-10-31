@@ -18,9 +18,8 @@ Rules that are easy to miss:
 - Never attach or send ID documents. An ID request gets the Art. 12(6) reply draft.
 - Act only for the inbox owner: requests go from the account's own address only.
 - The scan reads headers only. Bodies are read only for replies from companies with an open request.
-- Network: IMAP, the datenanfragen pull and privacy policy pages. Cloud models only with `--allow-cloud`,
-  Jev only with `--jev` (plan: `~/.claude/plans/art15-jev.md`). Jev gets replies only after `classify.redact()`
-  and attachment types only; for fields, names only. Keep it that way.
+- Network: IMAP, the datenanfragen pull and company websites. All models run on this machine (Ollama on
+  127.0.0.1). No cloud model, ever: never add a cloud path or a key for one.
 - The model sees field names and counts from exports, never values.
 - Evidence rule: a finding that says something is present needs a quote found word for word in a named file.
 - `.env` holds the Gmail app password: git-ignored, never print it.

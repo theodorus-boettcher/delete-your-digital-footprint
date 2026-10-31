@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS letters (
 -- replies from the company
 CREATE TABLE IF NOT EXISTS messages (
     message_id TEXT PRIMARY KEY, ref TEXT NOT NULL, date TEXT, from_addr TEXT, subject TEXT,
-    label TEXT, quote TEXT, path TEXT, confidence REAL, backend TEXT
+    label TEXT, quote TEXT, path TEXT, backend TEXT
 );
 CREATE TABLE IF NOT EXISTS findings (
     id INTEGER PRIMARY KEY, ref TEXT NOT NULL, kind TEXT, item TEXT, status TEXT,

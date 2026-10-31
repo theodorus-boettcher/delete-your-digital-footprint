@@ -22,7 +22,7 @@ from typing import Any
 import pymupdf
 from bs4 import BeautifulSoup
 
-from art15.llm import Ask, Decide
+from art15.llm import Ask
 
 MAX_PARSE = 200 * 2**20  # bigger files are listed, not parsed
 MEDIA = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".mp4", ".mov", ".mp3", ".m4a", ".wav", ".ogg"}
@@ -235,12 +235,10 @@ category it most likely holds:
 {cats}
 Field names:
 {names}"""
-FIELD_STATE = "Field names from a company's export of a user's personal data. Names only, no values."
-MIN_FIELD_P = 0.5  # a Jev answer below this leaves the field without a category
 
 
-def categorize(items: list[Item], ask: Ask | None, decide: Decide | None = None) -> None:
-    """Fill item.categories: keyword rules first, a model (Jev if given) only for names the rules don't know."""
+def categorize(items: list[Item], ask: Ask | None) -> None:
+    """Fill item.categories: keyword rules first, the model only for names the rules don't know."""
     unknown: set[str] = set()
     for it in items:
         if it.kind == "media":
@@ -251,23 +249,17 @@ def categorize(items: list[Item], ask: Ask | None, decide: Decide | None = None)
                 it.categories[f] = cat
             else:
                 unknown.add(f)
-    if not unknown or not (ask or decide):
+    if not unknown or ask is None:
         return
-    labels = model_categories(sorted(unknown), ask, decide)
+    labels = model_categories(sorted(unknown), ask)
     for it in items:
         for f in it.fields:
             if f not in it.categories and labels.get(f) in CATEGORIES:
                 it.categories[f] = labels[f]
 
 
-def model_categories(names: list[str], ask: Ask | None, decide: Decide | None = None) -> dict[str, str]:
-    """Field name -> category from Jev (names only go out) or the local model."""
-    if decide is not None:
-        questions = {f"f{i}": (f"Which kind of personal data does the field '{n}' hold?", CATEGORY_TEXT)
-                     for i, n in enumerate(names)}
-        answers = decide(FIELD_STATE, questions)
-        return {names[int(k[1:])]: d.choice for k, d in answers.items() if d.p >= MIN_FIELD_P}
-    assert ask is not None
+def model_categories(names: list[str], ask: Ask) -> dict[str, str]:
+    """Field name -> category from the local model."""
     cats = "\n".join(f"- {k}: {v}" for k, v in CATEGORY_TEXT.items())
     labels: dict[str, str] = {}
     for i in range(0, len(names), 150):

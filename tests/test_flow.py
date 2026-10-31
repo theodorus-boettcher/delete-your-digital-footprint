@@ -60,7 +60,7 @@ def test_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.Ca
         asked.append(prompt)
         return {"label": "acknowledged", "quote": "We have received your data subject access request"}
 
-    monkeypatch.setattr(llm, "make_ask", lambda env, cloud: fake_ask)
+    monkeypatch.setattr(llm, "make_ask", lambda env: fake_ask)
 
     cli.main(["--now", "2026-11-02", "draft", "shop-uk", "google"])
     out = capsys.readouterr().out
@@ -119,42 +119,32 @@ def test_followup_after_audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert con.execute("SELECT status FROM requests").fetchone()[0] == "admonished"
 
 
-def test_jev_sync_and_eval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_sync_and_eval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     fake_home(tmp_path, monkeypatch, [(FIX / "reply_ack.eml").read_bytes()])
-    with (tmp_path / ".env").open("a") as f:
-        f.write("ART15_JEV_KEY=x\n")
-    states: list[str] = []
 
     def fake_ask(prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
         if "label" in schema["properties"]:
             return {"label": "acknowledged", "quote": "We have received your data subject access request"}
-        return {n: "other" for n in schema["required"]}
+        return {n: "inferences" for n in schema["required"]}
 
-    def fake_decide(state: str, questions: llm.Questions) -> dict[str, llm.Decision]:
-        states.append(state)
-        return {k: llm.Decision("acknowledged" if k == "label" else "inferences", {"acknowledged": 0.9, "inferences": 0.9})
-                for k in questions}
-
-    monkeypatch.setattr(llm, "make_ask", lambda env, cloud: fake_ask)
-    monkeypatch.setattr(llm, "make_decide", lambda env: fake_decide)
+    monkeypatch.setattr(llm, "make_ask", lambda env: fake_ask)
     cli.main(["--now", "2026-11-02", "draft", "shop-uk"])
     con = sqlite3.connect(tmp_path / "data" / "art15.db")
     ref = con.execute("SELECT ref FROM requests").fetchone()[0]
     cli.main(["mark", ref, "sent", "--date", "2026-11-02"])
-    cli.main(["--jev", "--now", "2026-11-03", "sync"])
-    assert con.execute("SELECT label, confidence, backend FROM messages").fetchone() == ("acknowledged", 0.9, "jev")
-    assert "Ada" not in states[0] and "me@example.org" not in states[0]
+    cli.main(["--now", "2026-11-03", "sync"])
+    assert con.execute("SELECT label, backend FROM messages").fetchone() == ("acknowledged", "local")
 
     cli.main(["eval", "replies"])  # writes the label template
     labels = tmp_path / "data" / "labels.csv"
     labels.write_text(labels.read_text().replace(",,", ",acknowledged,", 1))
     capsys.readouterr()
-    cli.main(["--jev", "eval", "replies"])
+    cli.main(["eval", "replies"])
     out = capsys.readouterr().out
-    assert "local" in out and "jev" in out and "Jev calibration" in out
+    assert "100%" in out and "Mistakes" not in out
     assert (tmp_path / "data" / "report" / "eval.html").exists()
 
     (tmp_path / "data" / "field_labels.csv").write_text("field,category\nprofile.firstName,identity\nzzq,inferences\n")
-    cli.main(["--jev", "eval", "fields"])
+    cli.main(["eval", "fields"])
     out = capsys.readouterr().out
-    assert re.search(r"keyword rules\s+1/2\s+100%", out) and re.search(r"rules, then jev\s+2/2\s+100%", out)
+    assert re.search(r"keyword rules\s+1/2\s+100%", out) and re.search(r"rules, then local model\s+2/2\s+100%", out)
