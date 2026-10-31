@@ -215,7 +215,7 @@ def show_senders(con: sqlite3.Connection, limit: int) -> None:
 def fetch(url: str) -> str:
     r = httpx.get(url, follow_redirects=True, timeout=20, headers={"User-Agent": "Mozilla/5.0 art15"})
     r.raise_for_status()
-    return r.text
+    return finder.pdf_page(r.content) if "pdf" in r.headers.get("content-type", "") else r.text
 
 
 def page_reader(browser: Browser | None) -> finder.Read:

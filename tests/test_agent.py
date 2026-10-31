@@ -1,6 +1,7 @@
 from typing import Any
 
 import httpx
+import pymupdf
 import pytest
 
 from art15 import finder
@@ -95,8 +96,10 @@ def test_the_kind_of_address_counts_not_just_the_proof() -> None:
     home = {"https://shop.it/": "<p>Write to us at hello@shop.it any time you like.</p>" + PAD}
     assert finder.walk("shop.it", "Shop", site(home), answer("hello@shop.it", "Write to us at hello@shop.it any time you like.")).found is None
     line = "If you have questions about this policy, write to hello@shop.it at any time."
-    assert finder.walk("shop.it", "Shop", site(on_privacy_page(line)), answer("hello@shop.it", line, use="other")).found is None
-    assert finder.walk("shop.it", "Shop", site(on_privacy_page(line)), answer("hello@shop.it", line, use="general")).found is not None
+    assert finder.walk("shop.it", "Shop", site(on_privacy_page(line)), answer("hello@shop.it", line, use="other")).found is not None  # its own, on its privacy page
+    firm = "If you have questions about this policy, write to hello@someone-else.it at any time."
+    assert finder.walk("shop.it", "Shop", site(on_privacy_page(firm)), answer("hello@someone-else.it", firm, use="other")).found is None
+    assert finder.walk("shop.it", "Shop", site(on_privacy_page(firm)), answer("hello@someone-else.it", firm, use="general")).found is not None
 
 
 def test_rule_hits_at_other_domains_are_judged() -> None:
@@ -129,7 +132,7 @@ def test_model_sees_clean_links_and_cannot_invent_one() -> None:
 
     finder.walk("shop.it", "Shop", read, ask)
     assert "#rights" not in prompts[0] and "/jobs" not in prompts[0] and "https://shop.it/privacy" in prompts[0]
-    assert set(visited) <= {"https://shop.it/", "https://www.shop.it/", "https://shop.it/privacy", "https://shop.it/privacy-policy"}  # 99 went nowhere
+    assert not [u for u in visited if "99" in u]  # number 99 went nowhere
 
 
 def test_off_site_links() -> None:
@@ -150,6 +153,29 @@ def test_webform() -> None:
     assert finder.walk("shop.it", "Shop", site({"https://shop.it/": plain}), answer(form=1)).status == "nothing"  # not a form
     contact = '<a href="https://shop.it/kontakt/kontaktformular">Kontaktformular</a>' + PAD
     assert finder.walk("shop.it", "Shop", site({"https://shop.it/": contact}), answer(form=1)).status == "nothing"  # not for data requests
+
+
+def test_sitemap_finds_a_page_no_link_leads_to() -> None:
+    index = "<sitemapindex><sitemap><loc>https://shop.it/pages.xml</loc></sitemap></sitemapindex>"
+    pages_xml = "<urlset><url><loc>https://shop.it/about</loc></url><url><loc>https://shop.it/fr/legal/avis-privacy</loc></url></urlset>"
+    pages = {"https://shop.it/": PAD, "https://shop.it/sitemap.xml": index, "https://shop.it/pages.xml": pages_xml,
+             "https://shop.it/fr/legal/avis-privacy": "<p>Write to dpo@shop.it</p>" + PAD}  # Qonto
+    r = finder.walk("shop.it", "Shop", site(pages), None)
+    assert r.found is not None and r.found.url == "https://shop.it/fr/legal/avis-privacy"
+
+
+def test_guessed_pages_cover_other_languages() -> None:
+    pages = {"https://shop.it/": PAD, "https://shop.it/datenschutz": "<p>Write to dpo@shop.it</p>" + PAD}  # Kaufleuten
+    r = finder.walk("shop.it", "Shop", site(pages), None)
+    assert r.found is not None and r.found.email == "dpo@shop.it"
+
+
+def test_pdf_policy_reads_like_a_page() -> None:
+    doc = pymupdf.open()  # type: ignore[no-untyped-call]
+    doc.new_page().insert_text((72, 72), "Write to dpo@shop.it about your data.")
+    found = finder.privacy_email(finder.pdf_page(doc.tobytes()), "u.pdf", "shop.it")  # type: ignore[no-untyped-call]
+    assert found is not None and found.email == "dpo@shop.it"
+    assert finder.pdf_page(b"not a pdf") == ""
 
 
 def test_walk_stops_at_the_page_limit() -> None:

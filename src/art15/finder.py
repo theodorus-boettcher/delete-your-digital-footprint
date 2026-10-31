@@ -6,13 +6,16 @@ nothing but GET requests: it reads the company's own pages and never logs in or 
 """
 
 import re
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from html import escape
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 import httpx
-from bs4 import BeautifulSoup
+import pymupdf
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
 from art15.audit import policy_text, verified
 from art15.companies import FREEMAIL, registrable
@@ -20,16 +23,24 @@ from art15.llm import Ask
 
 Read = Callable[[str], str]
 
-MAX_PAGES = 5  # pages read per company
-MAX_TRIES = 10  # with the pages that failed
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)  # sitemaps
+
+MAX_PAGES = 8  # pages read per company
+MAX_TRIES = 30  # with the pages that failed
 MAX_LINKS = 15  # links shown to the model
 MAX_TEXT = 8000  # characters of a page shown to the model
 FOOTER = 1500  # characters at the end of an email
+MAX_SITEMAP = 5  # privacy pages taken from a sitemap
 THIN = 1500  # a page with less visible text than this probably needs JavaScript
 
 PRIVACY_PAGE = re.compile(r"privacy|datenschutz|privacidad|confidentialit|informativa|privacybeleid|gdpr|rgpd|dsgvo", re.I)
 MORE_PAGES = re.compile(r"contact|kontakt|contatt|impressum|imprint|legal|legali|help|support|aiuto|hilfe|data.?request|rights|diritti|rechte", re.I)
-PRIVACY_BOX = re.compile(r"privacy|dpo|datenschutz|gdpr|rgpd|dsgvo|data.?protection|dataprotect|privacidad|protezione|dsb", re.I)
+PRIVACY_BOX = re.compile(r"privacy|dpo|rpd|datenschutz|gdpr|rgpd|dsgvo|data.?protection|dataprotect|privacidad|protezione|dsb", re.I)
+# Where privacy pages usually live, when no link leads there. Most of these 404 at no cost.
+GUESSES = ("/privacy", "/privacy-policy", "/privacy-notice", "/privacy-statement", "/our-privacy-policy", "/legal/privacy",
+           "/legal/privacy-policy", "/legal/privacy-notice", "/legal-documents/privacy-notice", "/policies/privacy-policy",
+           "/pages/privacy-policy", "/en/privacy", "/en/privacy-policy", "/it/privacy", "/datenschutz", "/datenschutzerklaerung",
+           "/informativa-privacy", "/politique-de-confidentialite", "/politica-de-privacidad")
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}", re.I)
 # An address for another law's users (Hinge: "If you are located in Brazil ... dpobrazil@hinge.co") is not ours,
 # nor one for authorities (Hinge: "Article 11 of the DSA ... Point of Contact for Member State authorities").
@@ -130,7 +141,7 @@ def read_page(url: str, get: Read, browse: Read | None = None) -> str:
         pass
     text = policy_text(html)
     hidden = "email-protection" in html  # Cloudflare hides addresses until a browser runs the page
-    if len(text) >= THIN and not (hidden and browse):
+    if (len(text) >= THIN and not (hidden and browse)) or url.endswith(".xml"):
         return html
     if BOT_WALL.search(text):
         raise Refused(url)
@@ -139,6 +150,34 @@ def read_page(url: str, get: Read, browse: Read | None = None) -> str:
     if len(text) < THIN and BOT_WALL.search(text):
         raise Refused(url)
     return rendered or html
+
+
+def pdf_page(data: bytes) -> str:
+    """A PDF policy as a page: some companies publish nothing else."""
+    try:
+        with pymupdf.open(stream=data, filetype="pdf") as doc:  # type: ignore[no-untyped-call]
+            return f"<pre>{escape(chr(10).join(str(p.get_text()) for p in doc))}</pre>"
+    except (RuntimeError, ValueError):
+        return ""
+
+
+def sitemap_pages(site: str, read: Read) -> list[str]:
+    """Privacy pages from the site's own page list, for when no link leads to them."""
+    found: list[str] = []
+    todo = [f"https://{site}/sitemap.xml", f"https://www.{site}/sitemap.xml", f"https://{site}/sitemap_index.xml"]
+    for n, url in enumerate(todo):  # a sitemap can list further sitemaps, which join this list
+        if n >= 6:
+            break
+        try:
+            xml = read(url)
+        except Refused:
+            continue
+        for loc in re.findall(r"<loc>\s*(.*?)\s*</loc>", xml, re.I):
+            if loc.endswith(".xml"):
+                todo.append(loc)
+            elif PRIVACY_PAGE.search(urlsplit(loc).path) and loc not in found:
+                found.append(loc)
+    return sorted(found, key=len)[:MAX_SITEMAP]
 
 
 def _mailable(address: str) -> bool:
@@ -219,6 +258,11 @@ def _proven(address: str, quote: str, text: str, site: str, url: str) -> bool:
             and (site in PLATFORMS or domain not in PLATFORMS))
 
 
+def _own(address: str, site: str, domains: set[str]) -> bool:
+    domain = registrable(address.split("@")[-1])
+    return domain in domains or site.split(".")[0] in domain
+
+
 def _purpose(company: str, address: str, around: str, ask: Ask) -> str:
     """A second, narrow question: finding an address and judging it are different jobs."""
     try:
@@ -232,7 +276,7 @@ def _context(text: str, address: str, fallback: str) -> str:
     return text[max(0, i - 400): i + 200] if i >= 0 else fallback
 
 
-def _consult(company: str, url: str, html: str, links: list[tuple[str, str]], site: str, ask: Ask) -> tuple[Found | None, str]:
+def _consult(company: str, url: str, html: str, links: list[tuple[str, str]], site: str, domains: set[str], ask: Ask) -> tuple[Found | None, str]:
     """The model's view of one page: a checked contact, or the link to try next."""
     text = policy_text(html)
     listing = "\n".join(f"{i}. {u} ({t})" for i, (u, t) in enumerate(links, 1)) or "(none)"
@@ -242,7 +286,9 @@ def _consult(company: str, url: str, html: str, links: list[tuple[str, str]], si
         return None, ""
     written, quote = EMAIL.search(str(out.get("address", ""))), str(out.get("quote", ""))
     address = written.group().lower() if written else ""  # the model may add words around it ("Email us: ...")
-    if address and _proven(address, quote, text, site, url) and _purpose(company, address, _context(text, address, quote), ask) != "other":
+    # The company's own address on its own privacy page is enough. An address elsewhere may be a third party's.
+    if address and _proven(address, quote, text, site, url) and (
+            _own(address, site, domains) or _purpose(company, address, _context(text, address, quote), ask) != "other"):
         return Found(address, url, quote), ""
     form, follow = _pick(out.get("webform_link"), links), _pick(out.get("next_link"), links)
     label = f"{form} {dict(links).get(form, '')}"
@@ -280,11 +326,15 @@ def _walk(site: str, company: str, read: Read, ask: Ask | None, judge: Ask | Non
     rule hits at other domains: a policy also lists third parties (Marketo on Amazon's page)."""
     home = f"https://{site}/"
     # Some sites only work with www. (real-solution.de: a bad certificate without it).
-    queue, guesses = [home], [f"https://www.{site}/", urljoin(home, "/privacy"), urljoin(home, "/privacy-policy")]
+    queue, guesses = [home], [f"https://www.{site}/", *(urljoin(home, p) for p in GUESSES)]
+    mapped = False
     seen: set[str] = set()
     pages: list[str] = []
     refused = False
     for _ in range(MAX_TRIES):
+        if not queue and not mapped:
+            mapped = True
+            queue = sitemap_pages(site, read)
         queue = queue or guesses
         if not queue or len(pages) >= MAX_PAGES:
             break
@@ -303,15 +353,13 @@ def _walk(site: str, company: str, read: Read, ask: Ask | None, judge: Ask | Non
             continue
         pages.append(url)
         found = privacy_email(html, url, site)
-        if found:
-            domain = registrable(found.email.split("@")[1])
-            own = domain in domains or site.split(".")[0] in domain
-            if own or judge is None or _purpose(company, found.email, _context(policy_text(html), found.email, found.quote), judge) != "other":
-                return Lookup("email", found, pages)
+        if found and (_own(found.email, site, domains) or judge is None
+                      or _purpose(company, found.email, _context(policy_text(html), found.email, found.quote), judge) != "other"):
+            return Lookup("email", found, pages)
         links = candidate_links(html, url, seen, domains)
         follow = ""
         if ask is not None:
-            found, follow = _consult(company, url, html, links, site, ask)
+            found, follow = _consult(company, url, html, links, site, domains, ask)
             if found:
                 return Lookup("webform" if found.webform else "email", found, pages, "agent")
         ranked = [u for u, _ in links if u != follow and u not in queue]
