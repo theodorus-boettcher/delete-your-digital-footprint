@@ -26,7 +26,7 @@ import httpx
 
 from art15 import audit, db, evals, finder, letters, llm, mail, report
 from art15.browser import Browser
-from art15.classify import LABELS, Reply, classify
+from art15.classify import LABELS, Reply, classify, is_bounce
 from art15.companies import FREEMAIL, Companies, registrable
 from art15.deadlines import admonition_deadline, request_deadline
 
@@ -423,13 +423,9 @@ def draft_complaint(ctx: Ctx, imap: imaplib.IMAP4 | None, req: sqlite3.Row, adm:
     lang = auth.get("complaint-language", "en")
     findings = ctx.con.execute("SELECT item FROM findings WHERE ref = ? AND kind = 'checklist' AND status = 'missing'",
                                (req["ref"],)).fetchall()
-    story = (f"I did not receive a complete answer within the one-month period of Article 12(3) GDPR. "
-             f"On {adm['sent_at'] or adm['drafted_at']} I sent a reminder giving two more weeks, which also passed")
-    if findings:
-        story += f". Their answer is missing: {', '.join(f['item'] for f in findings)}"
-    story += ". Both letters are attached"
     recipient = f"{rec['name']}\n{rec.get('address', '')}\n{rec.get('email', '')}".strip()
-    body = letters.complaint(DA, lang, req["sent_at"], recipient, story, f"by email at {ctx.me}", ctx.name)
+    body = letters.complaint(DA, lang, req["sent_at"], adm["sent_at"] or adm["drafted_at"], recipient,
+                             [f["item"] for f in findings], ctx.me, ctx.name)
     request = request_letter(ctx, req["ref"])
     files = {f"{req['ref']}-request.txt": request["body"] if request else "", f"{req['ref']}-reminder.txt": adm["body"]}
     draft_letter(ctx, imap, req["ref"], "complaint", auth["email"], letters.subject("complaint", lang, req["ref"]), body,
@@ -499,11 +495,13 @@ def cmd_sync(ctx: Ctx, args: argparse.Namespace) -> None:
         domains = company_domains(ctx, req["slug"])
         our_ids = {r["msgid"] for r in ctx.con.execute("SELECT msgid FROM letters WHERE ref = ?", (ref,)) if r["msgid"]}
         found: dict[str, Message] = {}
-        for crit in [("SUBJECT", ref), *[("FROM", d) for d in sorted(domains)]]:
+        for crit in [("SUBJECT", ref), ("FROM", "mailer-daemon"), ("FROM", "postmaster"), *[("FROM", d) for d in sorted(domains)]]:
             for msg in mail.messages(imap, r"\All", "SINCE", since, *crit):
                 found.setdefault(mail.header(msg, "Message-ID") or hashlib.sha1(msg.as_bytes()).hexdigest(), msg)
         for mid, msg in sorted(found.items(), key=lambda kv: mail.msg_date(kv[1]) or datetime.min):
-            if parseaddr(mail.header(msg, "From"))[1].lower() == me or not mail.is_reply(msg, ref, domains, our_ids):
+            # A bounce shares nothing with the request but the letter inside it.
+            ours = mail.is_reply(msg, ref, domains, our_ids) or (is_bounce(msg) and ref.encode() in msg.as_bytes())
+            if parseaddr(mail.header(msg, "From"))[1].lower() == me or not ours:
                 continue
             if ctx.con.execute("SELECT 1 FROM messages WHERE message_id = ?", (mid,)).fetchone():
                 continue
@@ -613,7 +611,7 @@ def cmd_audit(ctx: Ctx, args: argparse.Namespace) -> None:
     ask = None if args.no_llm else ctx.ask
     items = audit.inventory(roots, None if args.no_llm else ocr)
     audit.categorize(items, ask)
-    letter = "\n\n".join(mail.body_text(mail.load(HOME / r["path"]))
+    letter = "\n\n".join(mail.reply_text(mail.load(HOME / r["path"]))
                          for r in ctx.con.execute("SELECT path FROM messages WHERE ref = ?", (ref,)))
     findings = audit.checklist(items, letter, ask)
 

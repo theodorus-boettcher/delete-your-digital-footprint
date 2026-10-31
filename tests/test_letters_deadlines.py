@@ -54,3 +54,11 @@ def test_request_deadline() -> None:
 def test_weekend_rolls_forward() -> None:
     assert request_deadline(date(2026, 9, 17)) == date(2026, 10, 19)  # Oct 17 is a Saturday
     assert admonition_deadline(date(2026, 11, 1)) == date(2026, 11, 16)  # Nov 15 is a Sunday
+
+
+def test_complaint_text_follows_the_language_and_leaves_no_template_text() -> None:
+    root = Path(__file__).parent / "fixtures" / "da"
+    body = letters.complaint(root, "it", "2026-11-02", "2026-12-03", "Shop", ["retention"], "a@b.it", "Ada Rossi")
+    assert "Non ho ricevuto" in body and "Nella risposta mancano: retention" in body and "via email all'indirizzo a@b.it" in body
+    assert "I did not receive" not in body
+    assert "[optional" not in letters.render("Ciao. [optional: Tieni privato.]\nGrazie.", set(), {})

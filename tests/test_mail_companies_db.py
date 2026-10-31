@@ -120,3 +120,11 @@ def test_eval_metrics() -> None:
             evals.Row("4", "extension", "acknowledged", "acknowledged")]
     m = evals.summary(rows)
     assert (m["raw_accuracy"], m["to_user"]) == (0.5, 0.25) and round(m["auto_accuracy"], 2) == 0.67
+
+
+def test_reply_text_drops_our_own_letter() -> None:
+    gmail = reply("Here is your data.\n\nOn Sat, 31 Oct 2026 at 05:11, theodorus boettcher <\nme@gmail.com> wrote:\n> the purposes of the processing;\n")
+    assert mail.reply_text(gmail) == "Here is your data."
+    italian = reply("Ecco i dati.\n\nIl giorno sab 31 ott 2026 alle 05:11 Ada <a@b.it> ha scritto:\nthe purposes of the processing;\n")
+    assert mail.reply_text(italian) == "Ecco i dati."
+    assert mail.reply_text(reply("> quoted only\nNew line.\n")) == "New line."

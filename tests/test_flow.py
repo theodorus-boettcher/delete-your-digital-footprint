@@ -192,3 +192,18 @@ def test_find_keeps_no_email_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert "email" not in capsys.readouterr().out.split("Records")[0]
     cli.main(["draft", "mailer-shop-it", "--dry-run"])
     assert "privacy@shop-italia.it" in capsys.readouterr().out
+
+
+def test_a_bounced_request_gets_no_reminder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    imap = fake_home(tmp_path, monkeypatch, [])
+    cli.main(["--now", "2026-11-02", "draft", "shop-uk"])
+    con = sqlite3.connect(tmp_path / "data" / "art15.db")
+    ref = con.execute("SELECT ref FROM requests").fetchone()[0]
+    cli.main(["mark", ref, "sent", "--date", "2026-11-02"])
+    imap.inbox.append((f"From: Mail Delivery Subsystem <mailer-daemon@googlemail.com>\r\nSubject: Delivery Status Notification (Failure)\r\n"
+                       f"Message-ID: <b@x>\r\n\r\nAddress not found.\r\nSubject: Request [{ref}]\r\n").encode())
+    drafts = len(imap.appended)
+    cli.main(["--now", "2026-11-03", "sync"])
+    assert con.execute("SELECT status FROM requests").fetchone() == ("bounced",)
+    cli.main(["--now", "2026-12-20", "sync"])  # past the deadline
+    assert len(imap.appended) == drafts

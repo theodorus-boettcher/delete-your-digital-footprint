@@ -11,6 +11,7 @@ from typing import Any
 
 FLAG = re.compile(r"\[(\w+)>(.*?)\]", re.S)
 VAR = re.compile(r"\{([^{}]+)\}")
+OPTIONAL = re.compile(r"\s*\[optional:[^\]]*\]")  # a sentence the template leaves to the writer; we leave it out
 
 SUBJECTS = {
     "access": {
@@ -47,6 +48,20 @@ Yours sincerely,
 """
 
 
+# shortcut: en, it and de only; other authorities get these sentences in English inside their own template.
+COMPLAINT = {
+    "en": ("I did not receive a complete answer within the one-month period of Article 12(3) GDPR. On {date} I sent a "
+           "reminder giving two more weeks, which also passed{missing}. Both letters are attached", "Their answer is missing: {items}",
+           "by email at {email}"),
+    "it": ("Non ho ricevuto una risposta completa entro il termine di un mese previsto dall'articolo 12(3) del GDPR. In data {date} "
+           "ho inviato un sollecito concedendo altre due settimane, anch'esse trascorse{missing}. Allego entrambe le lettere",
+           "Nella risposta mancano: {items}", "via email all'indirizzo {email}"),
+    "de": ("Ich habe innerhalb der Monatsfrist des Artikels 12(3) DSGVO keine vollständige Antwort erhalten. Am {date} habe ich "
+           "eine Erinnerung mit einer Frist von zwei weiteren Wochen geschickt, die ebenfalls verstrichen ist{missing}. Beide "
+           "Schreiben liegen bei", "In der Antwort fehlt: {items}", "per E-Mail unter {email}"),
+}
+
+
 def subject(kind: str, lang: str, ref: str) -> str:
     texts = SUBJECTS[kind]
     return f"{texts.get(lang, texts['en'])} [{ref}]"
@@ -72,7 +87,7 @@ def render(text: str, flags: set[str], variables: dict[str, str], free: list[str
         return m.group(0)
 
     text = VAR.sub(fill, text)
-    text = re.sub(r"</?italic>", "", text)
+    text = re.sub(r"</?italic>", "", OPTIONAL.sub("", text))
     return re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
 
 
@@ -101,10 +116,12 @@ def admonition(root: Path, lang: str, request_date: str, problem: str, name: str
     return render(text, set(), {"request_date": request_date, "request_article": "15"}, [problem]) + name + "\n"
 
 
-def complaint(root: Path, lang: str, request_date: str, recipient: str, story: str, contact: str, name: str) -> str:
+def complaint(root: Path, lang: str, request_date: str, reminder_date: str, recipient: str, missing: list[str], email: str, name: str) -> str:
+    story, gaps, contact = COMPLAINT.get(lang, COMPLAINT["en"])
+    told = ". " + gaps.format(items=", ".join(missing)) if missing else ""
     text = template(root, lang, "complaint")
     variables = {"request_date": request_date, "request_article": "15", "request_recipient_address": recipient}
-    return render(text, set(), variables, [story, contact]) + name + "\n"
+    return render(text, set(), variables, [story.format(date=reminder_date, missing=told), contact.format(email=email)]) + name + "\n"
 
 
 def idreply(email: str, name: str) -> str:

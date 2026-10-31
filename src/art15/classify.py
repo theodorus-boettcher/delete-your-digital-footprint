@@ -10,7 +10,7 @@ from email.utils import parseaddr
 
 from art15.audit import verified
 from art15.llm import Ask
-from art15.mail import attachments, body_text, header
+from art15.mail import attachments, header, reply_text
 
 LABEL_TEXT = {
     "acknowledged": "they confirm receipt or say they are working on it",
@@ -76,7 +76,7 @@ def plausible(label: str, body: str, files: list[str]) -> bool:
 def classify(msg: Message, ask: Ask) -> Reply:
     if is_bounce(msg):
         return Reply("bounce", backend="rule", pick="bounce")
-    body, subject = body_text(msg), header(msg, "Subject")
+    body, subject = reply_text(msg), header(msg, "Subject")
     files = [name for name, _ in attachments(msg)]
     out = ask(PROMPT.format(subject=subject, files=", ".join(files) or "none", body=body[:8000]), SCHEMA)
     label, quote = str(out.get("label", "other")), str(out.get("quote", ""))

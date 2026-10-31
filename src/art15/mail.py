@@ -18,6 +18,9 @@ from bs4 import BeautifulSoup
 
 from art15.companies import registrable
 
+# Where a mail client starts quoting. The date line can wrap, so these span lines.
+QUOTED = re.compile(r"^(?:On .{5,200}?wrote:|Il .{5,200}?ha scritto:|Am .{5,200}?schrieb.{0,120}?:|Le .{5,200}?a écrit\s*:|El .{5,200}?escribió:"
+                    r"|-{2,}\s*(?:Original Message|Messaggio originale|Ursprüngliche Nachricht)\s*-{2,})\s*$", re.M | re.S)
 LIST_LINE = re.compile(r"\((?P<flags>[^)]*)\) (?:\"[^\"]*\"|NIL) (?P<name>.+)")
 
 
@@ -133,6 +136,14 @@ def body_text(msg: Message) -> str:
     if part.get_content_subtype() == "html":
         text = BeautifulSoup(text, "html.parser").get_text("\n")
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
+
+
+def reply_text(msg: Message) -> str:
+    """What the sender wrote, without the quoted letter below it: our own words are not their answer."""
+    text = body_text(msg)
+    if m := QUOTED.search(text):
+        text = text[: m.start()]
+    return "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith(">")).strip()
 
 
 def attachments(msg: Message) -> list[tuple[str, bytes]]:
