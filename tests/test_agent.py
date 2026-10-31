@@ -26,6 +26,24 @@ def test_rules_win_without_the_model() -> None:
     assert r.found is not None and (r.found.email, r.how) == ("dpo@shop.it", "found")
 
 
+def test_rules_get_the_whole_walk_before_the_model() -> None:
+    home = '<a href="/privacy">Privacy</a><a href="https://shop.it/privacy-portal/form">Privacy request form</a>' + PAD
+    pages = {"https://shop.it/": home, "https://shop.it/privacy": "<p>Write to dpo@shop.it</p>" + PAD}
+    r = finder.walk("shop.it", "Shop", site(pages), answer(form=2))  # the model would have stopped on the home page
+    assert r.found is not None and (r.found.email, r.how) == ("dpo@shop.it", "found")
+
+
+def test_pages_are_read_once() -> None:
+    reads: list[str] = []
+
+    def read(url: str) -> str:
+        reads.append(url)
+        return HOME if url == "https://shop.it/" else ""
+
+    finder.walk("shop.it", "Shop", read, answer())
+    assert len(reads) == len(set(reads))
+
+
 def test_model_address_needs_proof() -> None:
     page = "<p>Our EU representative is Prighter, reachable at rep_shop@prighter.com for all requests.</p>" + PAD
     pages = {"https://shop.it/": page}
@@ -75,6 +93,8 @@ def test_webform() -> None:
     assert r.found is not None and r.status == "webform" and r.found.webform.endswith("/webform/abc")
     plain = '<a href="https://shop.it/privacy">Privacy</a>' + PAD
     assert finder.walk("shop.it", "Shop", site({"https://shop.it/": plain}), answer(form=1)).status == "nothing"  # not a form
+    contact = '<a href="https://shop.it/kontakt/kontaktformular">Kontaktformular</a>' + PAD
+    assert finder.walk("shop.it", "Shop", site({"https://shop.it/": contact}), answer(form=1)).status == "nothing"  # not for data requests
 
 
 def test_walk_stops_at_the_page_limit() -> None:

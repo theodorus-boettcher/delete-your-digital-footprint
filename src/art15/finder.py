@@ -200,14 +200,38 @@ def _consult(company: str, url: str, html: str, links: list[tuple[str, str]], si
     if address and _proven(address, quote, text, site):
         return Found(address, url, quote), ""
     form, follow = _pick(out.get("webform_link"), links), _pick(out.get("next_link"), links)
-    if form and WEBFORM.search(f"{form} {dict(links)[form]}"):
+    label = f"{form} {dict(links).get(form, '')}"
+    # A general contact form is not a way to make a data request.
+    if form and WEBFORM.search(label) and (PRIVACY_PAGE.search(label) or PORTAL.search(_host(form))):
         return Found("", url, dict(links)[form] or form, webform=form), ""
     return None, follow or form
 
 
 def walk(site: str, company: str, read: Read, ask: Ask | None, also: set[str] | None = None) -> Lookup:
-    """Read the company's site until a contact turns up or the pages run out. `also`: its other domains."""
+    """Rules over the whole walk first, so the model can only add to what they find; then the walk again with
+    the model, on the pages already read. `also`: the company's other domains."""
+    pages: dict[str, str | None] = {}
+
+    def once(url: str) -> str:
+        if url not in pages:
+            try:
+                pages[url] = read(url)
+            except Refused:
+                pages[url] = None
+        html = pages[url]
+        if html is None:
+            raise Refused(url)
+        return html
+
     domains = {site, *(also or set())}
+    rules = _walk(site, company, once, None, domains)
+    if rules.found or ask is None or rules.status == "blocked":
+        return rules
+    return _walk(site, company, once, ask, domains)
+
+
+def _walk(site: str, company: str, read: Read, ask: Ask | None, domains: set[str]) -> Lookup:
+    """Read the company's site until a contact turns up or the pages run out."""
     home = f"https://{site}/"
     queue, guesses = [home], [urljoin(home, "/privacy"), urljoin(home, "/privacy-policy")]
     seen: set[str] = set()
