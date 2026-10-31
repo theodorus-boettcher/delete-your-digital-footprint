@@ -256,6 +256,13 @@ def write_record(dom: str, site: str, company: str, r: finder.Lookup) -> str:
 
 
 def cmd_find(ctx: Ctx, args: argparse.Namespace) -> None:
+    try:
+        find_all(ctx, args)
+    except httpx.ConnectError:  # web pages handle their own errors, so this is the model
+        sys.exit("The model stopped answering. Start Ollama and run this again: finished senders are skipped.")
+
+
+def find_all(ctx: Ctx, args: argparse.Namespace) -> None:
     tried = set() if args.retry else {r["domain"] for r in ctx.con.execute("SELECT domain FROM lookups")}
     rows = ctx.con.execute("SELECT domain FROM senders WHERE slug IS NULL AND account_likely = 1 ORDER BY msgs DESC")
     todo = [r["domain"] for r in rows if r["domain"] not in tried]

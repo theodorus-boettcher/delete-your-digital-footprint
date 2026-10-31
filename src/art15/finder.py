@@ -71,6 +71,10 @@ SCHEMA = {"type": "object", "properties": {"address": {"type": "string"}, "quote
           "required": ["address", "quote", "webform_link", "next_link"]}
 
 
+# One bad answer costs a page, not the run. A model that is down is not in here: that must stop the run.
+BAD_ANSWER = (httpx.HTTPStatusError, httpx.TimeoutException, ValueError, KeyError)
+
+
 class Refused(Exception):
     """The site said no (403, a bot wall). We move on; we don't get around it."""
 
@@ -104,7 +108,7 @@ def read_page(url: str, get: Read, browse: Read | None = None) -> str:
         if e.response.status_code in (401, 403, 429):
             raise Refused(url) from e
         return ""  # a page that isn't there: no browser will change that
-    except (httpx.HTTPError, httpx.InvalidURL):
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError):
         pass
     text = policy_text(html)
     if len(text) >= THIN:
@@ -194,9 +198,10 @@ def _consult(company: str, url: str, html: str, links: list[tuple[str, str]], si
     listing = "\n".join(f"{i}. {u} ({t})" for i, (u, t) in enumerate(links, 1)) or "(none)"
     try:
         out = ask(PROMPT.format(company=company, url=url, text=relevant_parts(text), links=listing), SCHEMA)
-    except (httpx.HTTPError, ValueError, KeyError):  # a bad answer costs one page, not the run
+    except BAD_ANSWER:
         return None, ""
-    address, quote = str(out.get("address", "")).strip().lower(), str(out.get("quote", ""))
+    written, quote = EMAIL.search(str(out.get("address", ""))), str(out.get("quote", ""))
+    address = written.group().lower() if written else ""  # the model may add words around it ("Email us: ...")
     if address and _proven(address, quote, text, site):
         return Found(address, url, quote), ""
     form, follow = _pick(out.get("webform_link"), links), _pick(out.get("next_link"), links)
@@ -233,7 +238,8 @@ def walk(site: str, company: str, read: Read, ask: Ask | None, also: set[str] | 
 def _walk(site: str, company: str, read: Read, ask: Ask | None, domains: set[str]) -> Lookup:
     """Read the company's site until a contact turns up or the pages run out."""
     home = f"https://{site}/"
-    queue, guesses = [home], [urljoin(home, "/privacy"), urljoin(home, "/privacy-policy")]
+    # Some sites only work with www. (real-solution.de: a bad certificate without it).
+    queue, guesses = [home], [f"https://www.{site}/", urljoin(home, "/privacy"), urljoin(home, "/privacy-policy")]
     seen: set[str] = set()
     pages: list[str] = []
     refused = False
@@ -272,7 +278,7 @@ def identify(domain: str, body: str, ask: Ask, me: str = "") -> tuple[str, str]:
     footer = body[-FOOTER:]
     try:
         out = ask(IDENTIFY.format(domain=domain, footer=footer), IDENTIFY_SCHEMA)
-    except (httpx.HTTPError, ValueError, KeyError):
+    except BAD_ANSWER:
         return domain, domain
     company, website = str(out.get("company", "")).strip(), str(out.get("website", "")).strip()
     low = footer.lower()

@@ -60,6 +60,19 @@ def test_model_address_needs_proof() -> None:
     assert finder.walk("shop.it", "Shop", site(third), answer("contact@google.com", "Google can be reached at contact@google.com")).found is None
 
 
+def test_address_with_words_around_it() -> None:
+    line = "If you have a question about your data, please contact hello@shop.it at any time."
+    pages = {"https://shop.it/": f"<p>{line}</p>" + PAD}
+    r = finder.walk("shop.it", "Shop", site(pages), answer("Email us: hello@shop.it", line))
+    assert r.found is not None and r.found.email == "hello@shop.it"
+
+
+def test_www_when_the_plain_domain_fails() -> None:
+    pages = {"https://www.shop.it/": "<p>Write to dpo@shop.it</p>" + PAD}
+    r = finder.walk("shop.it", "Shop", site(pages), None)
+    assert r.found is not None and r.found.url == "https://www.shop.it/"
+
+
 def test_model_sees_clean_links_and_cannot_invent_one() -> None:
     prompts: list[str] = []
     visited: list[str] = []
@@ -74,7 +87,7 @@ def test_model_sees_clean_links_and_cannot_invent_one() -> None:
 
     finder.walk("shop.it", "Shop", read, ask)
     assert "#rights" not in prompts[0] and "/jobs" not in prompts[0] and "https://shop.it/privacy" in prompts[0]
-    assert set(visited) <= {"https://shop.it/", "https://shop.it/privacy", "https://shop.it/privacy-policy"}  # 99 went nowhere
+    assert set(visited) <= {"https://shop.it/", "https://www.shop.it/", "https://shop.it/privacy", "https://shop.it/privacy-policy"}  # 99 went nowhere
 
 
 def test_off_site_links() -> None:
@@ -168,3 +181,13 @@ def test_a_bad_answer_costs_a_page_not_the_run() -> None:
 
     assert finder.walk("shop.it", "Shop", site({"https://shop.it/": PAD}), broken).status == "nothing"
     assert finder.identify("mailer.net", "text", broken) == ("mailer.net", "mailer.net")
+
+
+def test_a_dead_model_stops_the_run() -> None:
+    def down(prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(httpx.ConnectError):
+        finder.walk("shop.it", "Shop", site({"https://shop.it/": PAD}), down)
+    with pytest.raises(httpx.ConnectError):
+        finder.identify("mailer.net", "text", down)
