@@ -148,7 +148,7 @@ def test_off_site_links() -> None:
 def test_webform() -> None:
     home = '<a href="https://privacyportal-de.onetrust.com/webform/abc">Send a data request</a>' + PAD
     r = finder.walk("shop.it", "Shop", site({"https://shop.it/": home}), answer(form=1))
-    assert r.found is not None and r.status == "webform" and r.found.webform.endswith("/webform/abc") and r.how == "found"
+    assert r.found is not None and r.status == "webform" and r.found.webform.endswith("/webform/abc")
     plain = '<a href="https://shop.it/privacy">Privacy</a>' + PAD
     assert finder.walk("shop.it", "Shop", site({"https://shop.it/": plain}), answer(form=1)).status == "nothing"  # not a form
     contact = '<a href="https://shop.it/kontakt/kontaktformular">Kontaktformular</a>' + PAD
@@ -176,6 +176,33 @@ def test_pdf_policy_reads_like_a_page() -> None:
     found = finder.privacy_email(finder.pdf_page(doc.tobytes()), "u.pdf", "shop.it")  # type: ignore[no-untyped-call]
     assert found is not None and found.email == "dpo@shop.it"
     assert finder.pdf_page(b"not a pdf") == ""
+
+
+def test_a_privacy_form_anywhere_counts_but_an_address_wins() -> None:
+    home = '<a href="https://help.shop.it/articles/123">How can I make a privacy request</a><a href="/privacy">Privacy</a>' + PAD  # Hinge
+    r = finder.walk("shop.it", "Shop", site({"https://shop.it/": home}), None)
+    assert r.status == "webform" and r.found is not None and r.found.webform == "https://help.shop.it/articles/123"
+    pages = {"https://shop.it/": home, "https://shop.it/privacy": "<p>Write to dpo@shop.it</p>" + PAD}
+    assert finder.walk("shop.it", "Shop", site(pages), None).status == "email"
+    assert finder.walk("shop.it", "Shop", site({"https://shop.it/": home}), answer()).status == "webform"  # the model adds nothing, the form stays
+
+
+def test_a_dead_site_costs_two_tries() -> None:
+    tried: list[str] = []
+
+    def dead(url: str) -> str:
+        tried.append(url)
+        return ""
+
+    assert finder.walk("shop.it", "Shop", dead, None).status == "nothing"
+    assert tried == ["https://shop.it/", "https://www.shop.it/"]
+
+
+def test_guesses_run_before_the_page_limit() -> None:
+    chain = {f"https://shop.it/privacy{i}": f'<a href="/privacy{i + 1}">Privacy</a>' + PAD for i in range(20)}
+    chain["https://shop.it/"] = '<a href="/privacy0">Privacy</a>' + PAD
+    chain["https://shop.it/datenschutz"] = "<p>Write to dpo@shop.it</p>" + PAD  # Kaufleuten: many links, none of them this page
+    assert finder.walk("shop.it", "Shop", site(chain), None).status == "email"
 
 
 def test_walk_stops_at_the_page_limit() -> None:

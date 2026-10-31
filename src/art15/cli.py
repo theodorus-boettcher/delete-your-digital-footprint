@@ -732,7 +732,8 @@ def eval_finder(ctx: Ctx, args: argparse.Namespace) -> None:
     counts = Counter(r[3] for r in rows)
     head = ["outcome", "companies"]
     lines = [[k, str(counts[k])] for k in ("same address", "same company domain", "different address", "web form", "blocked", "nothing")]
-    print(f"\n{evals.text_table(head, lines)}\n\n{args.n} tested of {len(recs)} usable records, "
+    success = sum(counts[k] for k in ("same address", "same company domain", "web form"))  # a form counts: it is how to reach them
+    print(f"\n{evals.text_table(head, lines)}\n\ncontact found: {success} of {args.n}. {args.n} tested of {len(recs)} usable records, "
           f"{sum(float(r[5]) for r in rows) / args.n:.1f} s per company")
     mode = ("rules" if args.no_llm else "agent") + ("" if args.no_browser else "-browser")
     out = DATA / "report" / f"eval-finder-{mode}.html"

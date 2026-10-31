@@ -26,7 +26,8 @@ Read = Callable[[str], str]
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)  # sitemaps
 
 MAX_PAGES = 8  # pages read per company
-MAX_TRIES = 30  # with the pages that failed
+MAX_TRIES = 40  # with the pages that failed
+LINK_PAGES = 5  # pages spent following links, before the sitemap and the guesses get their turn
 MAX_LINKS = 15  # links shown to the model
 MAX_TEXT = 8000  # characters of a page shown to the model
 FOOTER = 1500  # characters at the end of an email
@@ -52,6 +53,9 @@ PEC = re.compile(r"@(?:[\w-]+\.)*(?:pec|legalmail)\.", re.I)  # Italian certifie
 WRONG_BOX = re.compile(r"security|abuse|sales|sponsor|marketing|press|jobs|career|billing|no-?reply|donotreply|partner|advert|assicurazioni|insurance", re.I)
 PORTAL = re.compile(r"onetrust|trustarc|privacy-?portal|transcend|securiti|datagrail|ketch|^privacy\.", re.I)
 WEBFORM = re.compile(r"\bform\b|webform|formular|modulo|portal|request|richiesta|anfrage|onetrust|trustarc", re.I)
+# A link that says it is the way to make a data request, wherever it lives.
+FORM_LINK = re.compile(r"privacy.{0,30}(?:request|form|portal|choices)|(?:request|form).{0,30}privacy|data.{0,10}(?:request|subject)|dsar|"
+                       r"datenanfrage|datenauskunft|richiesta.{0,20}(?:dati|privacy)|exercise.{0,20}rights|demande.{0,20}donn", re.I)
 BOT_WALL = re.compile(r"just a moment|verify you are human|are you human|attention required|access denied|captcha", re.I)
 # Policies name these as third parties. Their addresses and pages are about them, not about the company we look for.
 PLATFORMS = {"google.com", "facebook.com", "meta.com", "microsoft.com", "apple.com", "linkedin.com", "twitter.com", "x.com",
@@ -316,26 +320,27 @@ def walk(site: str, company: str, read: Read, ask: Ask | None, also: set[str] | 
 
     domains = {site, *(also or set())}
     rules = _walk(site, company, once, None, ask, domains)
-    if rules.found or ask is None or rules.status == "blocked":
+    if rules.status in ("email", "blocked") or ask is None:
         return rules
-    return _walk(site, company, once, ask, ask, domains)
+    agent = _walk(site, company, once, ask, ask, domains)
+    return agent if agent.found else rules  # a form is a success, but an address is better
 
 
 def _walk(site: str, company: str, read: Read, ask: Ask | None, judge: Ask | None, domains: set[str]) -> Lookup:
     """Read the company's site until a contact turns up or the pages run out. `ask` steers, `judge` checks
     rule hits at other domains: a policy also lists third parties (Marketo on Amazon's page)."""
     home = f"https://{site}/"
-    # Some sites only work with www. (real-solution.de: a bad certificate without it).
-    queue, guesses = [home], [f"https://www.{site}/", *(urljoin(home, p) for p in GUESSES)]
+    queue = [home, f"https://www.{site}/"]  # some sites only work with www. (real-solution.de: a bad certificate without it)
     mapped = False
     seen: set[str] = set()
     pages: list[str] = []
+    form: Found | None = None
     refused = False
     for _ in range(MAX_TRIES):
-        if not queue and not mapped:
+        # Only for a site that answers: a dead one would cost a timeout per guess.
+        if pages and not mapped and (not queue or len(pages) >= LINK_PAGES):
             mapped = True
-            queue = sitemap_pages(site, read)
-        queue = queue or guesses
+            queue = [*sitemap_pages(site, read), *(urljoin(home, p) for p in GUESSES), *queue]
         if not queue or len(pages) >= MAX_PAGES:
             break
         url = queue.pop(0)
@@ -357,6 +362,7 @@ def _walk(site: str, company: str, read: Read, ask: Ask | None, judge: Ask | Non
                       or _purpose(company, found.email, _context(policy_text(html), found.email, found.quote), judge) != "other"):
             return Lookup("email", found, pages)
         links = candidate_links(html, url, seen, domains)
+        form = form or next((Found("", url, t or u, webform=u) for u, t in links if FORM_LINK.search(f"{u} {t}")), None)
         follow = ""
         if ask is not None:
             found, follow = _consult(company, url, html, links, site, domains, ask)
@@ -364,6 +370,8 @@ def _walk(site: str, company: str, read: Read, ask: Ask | None, judge: Ask | Non
                 return Lookup("webform" if found.webform else "email", found, pages, "agent")
         ranked = [u for u, _ in links if u != follow and u not in queue]
         queue = ([follow] if follow else []) + ranked + queue
+    if form:
+        return Lookup("webform", form, pages)
     return Lookup("blocked" if refused and not pages else "nothing", pages=pages)
 
 
