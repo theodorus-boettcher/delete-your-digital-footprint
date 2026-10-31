@@ -187,6 +187,23 @@ def test_a_privacy_form_anywhere_counts_but_an_address_wins() -> None:
     assert finder.walk("shop.it", "Shop", site({"https://shop.it/": home}), answer()).status == "webform"  # the model adds nothing, the form stays
 
 
+def test_general_address_is_the_fallback() -> None:
+    policy = "<p>For questions about this policy write to info@shop.it at any time.</p>" + PAD
+    pages = {"https://shop.it/": '<a href="/privacy">Privacy</a>' + PAD, "https://shop.it/privacy": policy}
+    r = finder.walk("shop.it", "Shop", site(pages), None)
+    assert r.found is not None and (r.status, r.how, r.found.email) == ("email", "general", "info@shop.it")
+    r = finder.walk("shop.it", "Shop", site(pages), answer())  # the model says nothing, as it did on real pages
+    assert r.found is not None and r.how == "general"
+    line = "Our EU representative is Prighter, reachable at rep_shop@prighter.com for all requests."
+    with_rep = {**pages, "https://shop.it/privacy": policy + f"<p>{line}</p>"}
+    r = finder.walk("shop.it", "Shop", site(with_rep), answer("rep_shop@prighter.com", line))
+    assert r.found is not None and (r.found.email, r.how) == ("rep_shop@prighter.com", "agent")  # the model's find beats the fallback
+    home = '<a href="https://shop.it/data">Privacy request form</a><a href="/privacy">Privacy</a>' + PAD
+    assert finder.walk("shop.it", "Shop", site({**pages, "https://shop.it/": home}), None).status == "webform"  # a form beats it too
+    contact = {"https://shop.it/": PAD, "https://shop.it/contact": "<p>Write to info@shop.it</p>" + PAD}
+    assert finder.walk("shop.it", "Shop", site(contact), None).found is None  # not a privacy page
+
+
 def test_ordinary_privacy_pages_are_not_forms() -> None:
     for text in ("Informativa privacy", "Privacy information", "Privacy policy and more information"):
         home = f'<a href="https://shop.it/page">{text}</a>' + PAD

@@ -125,7 +125,7 @@ class Lookup:
     status: str  # email, webform, blocked or nothing
     found: Found | None = None
     pages: list[str] = field(default_factory=list)
-    how: str = "found"  # the record's quality: "found" by rules, "agent" with the model
+    how: str = "found"  # the record's quality: "found" by rules, "agent" with the model, "general" as a fallback
 
 
 def _host(url: str) -> str:
@@ -267,6 +267,16 @@ def _own(address: str, site: str, domains: set[str]) -> bool:
     return domain in domains or site.split(".")[0] in domain
 
 
+def _general(text: str, url: str, site: str, domains: set[str]) -> Found | None:
+    """The fallback: the company's own address on its own privacy page, for companies with no privacy box.
+    Code, not the model: shown a plain info@ on a privacy page, the model said nothing on 6 companies of 6."""
+    for m in EMAIL.finditer(text):
+        address, around = m.group().lower().rstrip("."), text[max(0, m.start() - 120): m.end() + 60]
+        if _own(address, site, domains) and _mailable(address) and not WRONG_BOX.search(address.split("@")[0]) and not OTHER_LAW.search(around):
+            return Found(address, url, re.sub(r"\s+", " ", around).strip())
+    return None
+
+
 def _purpose(company: str, address: str, around: str, ask: Ask) -> str:
     """A second, narrow question: finding an address and judging it are different jobs."""
     try:
@@ -320,10 +330,10 @@ def walk(site: str, company: str, read: Read, ask: Ask | None, also: set[str] | 
 
     domains = {site, *(also or set())}
     rules = _walk(site, company, once, None, ask, domains)
-    if rules.status in ("email", "blocked") or ask is None:
+    if ask is None or rules.status == "blocked" or rules.how == "found" and rules.status == "email":
         return rules
     agent = _walk(site, company, once, ask, ask, domains)
-    return agent if agent.found else rules  # a form is a success, but an address is better
+    return agent if agent.how == "agent" else rules  # best first: a privacy address, a form, a general address
 
 
 def _walk(site: str, company: str, read: Read, ask: Ask | None, judge: Ask | None, domains: set[str]) -> Lookup:
@@ -335,6 +345,7 @@ def _walk(site: str, company: str, read: Read, ask: Ask | None, judge: Ask | Non
     seen: set[str] = set()
     pages: list[str] = []
     form: Found | None = None
+    general: Found | None = None
     refused = False
     for _ in range(MAX_TRIES):
         # Only for a site that answers: a dead one would cost a timeout per guess.
@@ -361,6 +372,8 @@ def _walk(site: str, company: str, read: Read, ask: Ask | None, judge: Ask | Non
         if found and (_own(found.email, site, domains) or judge is None
                       or _purpose(company, found.email, _context(policy_text(html), found.email, found.quote), judge) != "other"):
             return Lookup("email", found, pages)
+        if PRIVACY_PAGE.search(url):
+            general = general or _general(policy_text(html), url, site, domains)
         links = candidate_links(html, url, seen, domains)
         form = form or next((Found("", url, t or u, webform=u) for u, t in links if FORM_LINK.search(f"{u} {t}")), None)
         follow = ""
@@ -372,6 +385,8 @@ def _walk(site: str, company: str, read: Read, ask: Ask | None, judge: Ask | Non
         queue = ([follow] if follow else []) + ranked + queue
     if form:
         return Lookup("webform", form, pages)
+    if general:
+        return Lookup("email", general, pages, "general")
     return Lookup("blocked" if refused and not pages else "nothing", pages=pages)
 
 
