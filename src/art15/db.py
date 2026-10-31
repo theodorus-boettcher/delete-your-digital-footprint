@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS messages (
     message_id TEXT PRIMARY KEY, ref TEXT NOT NULL, date TEXT, from_addr TEXT, subject TEXT,
     label TEXT, quote TEXT, path TEXT, backend TEXT
 );
+-- what `art15 find` did per sender: `scan` rebuilds senders, and a long run must be able to resume
+CREATE TABLE IF NOT EXISTS lookups (
+    domain TEXT PRIMARY KEY, status TEXT, pages INTEGER, tried_at TEXT
+);
 CREATE TABLE IF NOT EXISTS findings (
     id INTEGER PRIMARY KEY, ref TEXT NOT NULL, kind TEXT, item TEXT, status TEXT,
     quote TEXT, file TEXT, created_at TEXT

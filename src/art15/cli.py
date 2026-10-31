@@ -6,6 +6,7 @@ import hashlib
 import imaplib
 import json
 import os
+import random
 import re
 import secrets
 import sqlite3
@@ -13,15 +14,18 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from contextlib import nullcontext
 from datetime import date, datetime
 from email.message import EmailMessage, Message
 from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from art15 import audit, db, evals, finder, letters, llm, mail, report
+from art15.browser import Browser
 from art15.classify import LABELS, Reply, classify
 from art15.companies import FREEMAIL, Companies, registrable
 from art15.deadlines import admonition_deadline, request_deadline
@@ -140,6 +144,12 @@ def cmd_setup(ctx: Ctx, args: argparse.Namespace) -> None:
         print(f"IMAP: failed ({e}). Check the app password and that IMAP is on in Gmail settings.")
 
     try:
+        with Browser():
+            print("browser: ok")
+    except SystemExit as e:
+        print(f"browser: {e}")
+
+    try:
         have = llm.models()
         for key, default in (("ART15_MODEL", "qwen3:8b"), ("ART15_VLM", "qwen2.5vl:3b")):
             m = ctx.env.get(key, default)
@@ -208,25 +218,74 @@ def fetch(url: str) -> str:
     return r.text
 
 
-def cmd_find(ctx: Ctx, args: argparse.Namespace) -> None:
-    rows = ctx.con.execute("SELECT domain FROM senders WHERE slug IS NULL AND account_likely = 1 "
-                           "ORDER BY msgs DESC LIMIT ?", (args.top,)).fetchall()
+def page_reader(browser: Browser | None) -> finder.Read:
+    def read(url: str) -> str:
+        time.sleep(1)  # one site at a time, one request a second
+        return finder.read_page(url, fetch, browser.html if browser else None)
+    return read
+
+
+def need_model() -> None:
+    try:
+        llm.models()
+    except httpx.HTTPError:
+        sys.exit("Ollama is off: start it with `~/.local/opt/ollama/bin/ollama serve`, or pass --no-llm.")
+
+
+def sender_identity(ctx: Ctx, dom: str, ask: llm.Ask) -> tuple[str, str]:
+    """Company and website from the newest email of an unknown sender. The email is read here and not kept."""
+    try:
+        imap = ctx.imap()
+        msg = mail.newest_from(imap, dom)
+        imap.logout()
+    except (imaplib.IMAP4.error, OSError):
+        return dom, dom
+    return finder.identify(dom, mail.body_text(msg), ask, f"{ctx.name} {ctx.me}") if msg else (dom, dom)
+
+
+def write_record(dom: str, site: str, company: str, r: finder.Lookup) -> str:
+    assert r.found is not None
+    slug = re.sub(r"[^a-z0-9]+", "-", dom)
+    rec: dict[str, Any] = {"slug": slug, "relevant-countries": ["all"], "name": company, "web": f"https://{site}/",
+                           "runs": [dom], "sources": r.pages, "quality": r.how, "comments": [f"art15 find: {r.found.quote}"],
+                           "suggested-transport-medium": "webform" if r.found.webform else "email"}
+    rec |= {"webform": r.found.webform} if r.found.webform else {"email": r.found.email}
     OWN.mkdir(parents=True, exist_ok=True)
-    for r in rows:
-        dom = r["domain"]
-        found = finder.find(dom, fetch)
-        if found is None:
-            print(f"{dom:<26} not found (no privacy address on its privacy pages, or the site blocks scripts)")
-            continue
-        slug = re.sub(r"[^a-z0-9]+", "-", dom)
-        rec = {"slug": slug, "relevant-countries": ["all"], "name": dom, "web": f"https://{dom}/", "email": found.email,
-               "sources": [found.url], "suggested-transport-medium": "email", "quality": "found",
-               "comments": [f"art15 find: {found.quote}"]}
-        (OWN / f"{slug}.json").write_text(json.dumps(rec, indent=2, ensure_ascii=False) + "\n")
-        ctx.con.execute("UPDATE senders SET slug = ? WHERE domain = ?", (slug, dom))
-        ctx.con.commit()
-        print(f"{dom:<26} {found.email:<34} {found.url}\n{'':<27}\"{found.quote}\"")
-    print(f"\nRecords are in {OWN.relative_to(HOME)}/: check each address before `art15 draft`; fix or delete a file to correct it.")
+    (OWN / f"{slug}.json").write_text(json.dumps(rec, indent=2, ensure_ascii=False) + "\n")
+    return slug
+
+
+def cmd_find(ctx: Ctx, args: argparse.Namespace) -> None:
+    tried = set() if args.retry else {r["domain"] for r in ctx.con.execute("SELECT domain FROM lookups")}
+    rows = ctx.con.execute("SELECT domain FROM senders WHERE slug IS NULL AND account_likely = 1 ORDER BY msgs DESC")
+    todo = [r["domain"] for r in rows if r["domain"] not in tried]
+    todo = todo[: args.top] if args.top else todo
+    ask = None if args.no_llm else ctx.ask
+    if ask:
+        need_model()
+    known = {r["slug"] for r in ctx.con.execute("SELECT DISTINCT slug FROM senders WHERE slug IS NOT NULL")}
+    counts: Counter[str] = Counter()
+    with Browser() if not args.no_browser else nullcontext(None) as browser:
+        read = page_reader(browser)
+        for i, dom in enumerate(todo, 1):
+            company, site = sender_identity(ctx, dom, ask) if ask else (dom, dom)
+            slug = ctx.companies.match(site, known) if site != dom else None
+            if slug:
+                status, pages, note = "list", 0, f"same company as {slug}, already on the list"
+            else:
+                r = finder.walk(site, company, read, ask, {dom})
+                status, pages, note = r.status, len(r.pages), ""
+                if r.found:
+                    slug = write_record(dom, site, company, r)
+                    note = f"{r.found.webform or r.found.email}  ({r.how}) {r.found.url}\n{'':<6}\"{r.found.quote[:160]}\""
+            if slug:
+                ctx.con.execute("UPDATE senders SET slug = ? WHERE domain = ?", (slug, dom))
+            ctx.con.execute("INSERT OR REPLACE INTO lookups VALUES (?,?,?,?)", (dom, status, pages, ctx.today.isoformat()))
+            ctx.con.commit()
+            counts[status] += 1
+            print(f"[{i}/{len(todo)}] {dom:<28} {status:<8} {note}", flush=True)
+    print("\n" + ", ".join(f"{k}: {v}" for k, v in counts.most_common()))
+    print(f"Records are in {OWN.relative_to(HOME)}/: check each one before `art15 draft`; fix or delete a file to correct it.")
 
 
 # ---------- draft ----------
@@ -640,7 +699,42 @@ def eval_fields(ctx: Ctx, labels: Path) -> None:
     print(f"\n{out.relative_to(HOME)}")
 
 
+def eval_finder(ctx: Ctx, args: argparse.Namespace) -> None:
+    """Pretend verified public records are missing and see if the finder recovers their address."""
+    recs = [r for _, r in sorted(ctx.companies.records.items())
+            if r.get("quality") == "verified" and r.get("email") and r.get("web")
+            and r.get("suggested-transport-medium", "email") == "email"]
+    ask = None if args.no_llm else ctx.ask
+    if ask:
+        need_model()
+    rows = []
+    with Browser() if not args.no_browser else nullcontext(None) as browser:
+        read = page_reader(browser)
+        for rec in random.Random(15).sample(recs, args.n):  # a fixed sample, so runs compare
+            dom = registrable(urlsplit(rec["web"]).hostname or "")
+            t0 = time.perf_counter()
+            r = finder.walk(dom, rec["name"], read, ask)
+            got = r.found.webform or r.found.email if r.found else ""
+            outcome = "web form" if r.status == "webform" else r.status if not r.found else evals.finder_outcome(rec["email"], got)
+            rows.append([dom, rec["email"], got, outcome, str(len(r.pages)), f"{time.perf_counter() - t0:.1f}"])
+            print(f"{dom:<30} {outcome:<20} {got}", flush=True)
+    counts = Counter(r[3] for r in rows)
+    head = ["outcome", "companies"]
+    lines = [[k, str(counts[k])] for k in ("same address", "same company domain", "different address", "web form", "blocked", "nothing")]
+    print(f"\n{evals.text_table(head, lines)}\n\n{args.n} tested of {len(recs)} usable records, "
+          f"{sum(float(r[5]) for r in rows) / args.n:.1f} s per company")
+    mode = ("rules" if args.no_llm else "agent") + ("" if args.no_browser else "-browser")
+    out = DATA / "report" / f"eval-finder-{mode}.html"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(report.page("art15 finder eval", f"<h1>Finder: {mode}</h1>" + evals.table(head, lines)
+                               + evals.table(["domain", "verified", "found", "outcome", "pages", "s"], rows)))
+    print(f"\n{out.relative_to(HOME)}")
+
+
 def cmd_eval(ctx: Ctx, args: argparse.Namespace) -> None:
+    if args.what == "finder":
+        eval_finder(ctx, args)
+        return
     default = DATA / ("labels.csv" if args.what == "replies" else "field_labels.csv")
     (eval_replies if args.what == "replies" else eval_fields)(ctx, Path(args.labels) if args.labels else default)
 
@@ -675,8 +769,11 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("scan", help="find companies in your mail (headers only)")
     s.add_argument("--limit", type=int, default=40)
     s.set_defaults(fn=cmd_scan)
-    s = sub.add_parser("find", help="look up the privacy email of likely accounts with no company record")
-    s.add_argument("--top", type=int, default=30)
+    s = sub.add_parser("find", help="look up the privacy contact of likely accounts with no company record")
+    s.add_argument("--top", type=int, default=0, help="only the first N senders (default: all)")
+    s.add_argument("--retry", action="store_true", help="also try senders already tried")
+    s.add_argument("--no-llm", action="store_true", help="rules only, no model and no email is read")
+    s.add_argument("--no-browser", action="store_true", help="plain downloads only")
     s.set_defaults(fn=cmd_find)
     s = sub.add_parser("draft", help="put access requests in your Drafts folder")
     s.add_argument("slugs", nargs="*")
@@ -692,8 +789,11 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--no-policy", action="store_true")
     s.add_argument("--no-llm", action="store_true", help="rules only, no model")
     s.set_defaults(fn=cmd_audit)
-    s = sub.add_parser("eval", help="the local model on replies or field names you labelled by hand")
-    s.add_argument("what", choices=["replies", "fields"])
+    s = sub.add_parser("eval", help="measure the local model (replies, fields) or the finder")
+    s.add_argument("what", choices=["replies", "fields", "finder"])
+    s.add_argument("--n", type=int, default=30, help="finder: how many verified companies to test")
+    s.add_argument("--no-llm", action="store_true", help="finder: rules only")
+    s.add_argument("--no-browser", action="store_true", help="finder: plain downloads only")
     s.add_argument("--labels", help="the CSV with your labels (default data/labels.csv or data/field_labels.csv)")
     s.set_defaults(fn=cmd_eval)
     sub.add_parser("report", help="write the HTML report").set_defaults(fn=cmd_report)

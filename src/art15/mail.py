@@ -64,6 +64,13 @@ def messages(imap: imaplib.IMAP4, flag: str, *criteria: str) -> list[Message]:
     return list(_fetch(imap, _search(imap, box, *criteria), "BODY.PEEK[]", batch=50))
 
 
+def newest_from(imap: imaplib.IMAP4, domain: str) -> Message | None:
+    """The newest email from a domain, with its body: `art15 find` reads its footer and keeps none of it."""
+    uids = _search(imap, folder(imap, r"\All"), "FROM", domain)
+    msg = next(_fetch(imap, uids[-1:], "BODY.PEEK[]"), None)
+    return msg if msg is not None and registrable(sender_domain(msg)) == domain else None
+
+
 def append_draft(imap: imaplib.IMAP4, msg: EmailMessage) -> None:
     typ, data = imap.append(folder(imap, r"\Drafts"), r"(\Draft)", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
     if typ != "OK":

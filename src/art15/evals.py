@@ -1,9 +1,11 @@
-"""`art15 eval`: the local model on replies and field names the user labelled by hand."""
+"""`art15 eval`: the local model on hand-labelled replies and field names; the finder on verified public records."""
 
 import csv
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
+
+from art15.companies import registrable
 
 
 @dataclass
@@ -26,6 +28,14 @@ def summary(rows: list[Row]) -> dict[str, float]:
         "auto_accuracy": sum(r.final == r.truth for r in auto) / len(auto) if auto else 0.0,
         "seconds": sum(r.seconds for r in rows) / n,
     }
+
+
+def finder_outcome(truth: str, found: str) -> str:
+    """How the address the finder came up with compares with the verified one."""
+    if found.lower() == truth.lower():
+        return "same address"
+    same = registrable(found.rsplit("@", 1)[-1]) == registrable(truth.rsplit("@", 1)[-1])
+    return "same company domain" if same else "different address"
 
 
 def read_labels(path: Path, key: str, label: str) -> dict[str, str]:

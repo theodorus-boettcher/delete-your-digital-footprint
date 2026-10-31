@@ -46,6 +46,7 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inbox: builtins.l
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setattr(cli, "DATA", tmp_path / "data")
     monkeypatch.setattr(cli, "DA", FIX / "da")
+    monkeypatch.setattr(cli, "OWN", tmp_path / "data" / "records")
     (tmp_path / ".env").write_text("ART15_NAME=Ada Rossi\nART15_EMAIL=me@example.org\nART15_APP_PASSWORD=x\nART15_COUNTRY=it\n")
     imap = FakeIMAP(inbox)
     monkeypatch.setattr(mail, "connect", lambda *a: imap)
@@ -148,3 +149,39 @@ def test_sync_and_eval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: 
     cli.main(["eval", "fields"])
     out = capsys.readouterr().out
     assert re.search(r"keyword rules\s+1/2\s+100%", out) and re.search(r"rules, then local model\s+2/2\s+100%", out)
+
+
+def test_find_keeps_no_email_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    secret = "Your order 7781 ships to Via Segreta 9"
+    mail_from = (f"From: Shop <news@mailer-shop.it>\r\nSubject: Order\r\nMessage-ID: <1@x>\r\n\r\n{secret}\r\n"
+                 "Shop Italia S.r.l. www.shop-italia.it\r\n").encode()
+    fake_home(tmp_path, monkeypatch, [mail_from])
+    policy_page = "<p>Write to privacy@shop-italia.it with any request.</p>" + "<p>" + "Words about the shop. " * 100 + "</p>"
+    prompts: list[str] = []
+
+    def fake_ask(prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+        prompts.append(prompt)
+        return {"company": "Shop Italia S.r.l.", "website": "www.shop-italia.it"}
+
+    monkeypatch.setattr(llm, "make_ask", lambda env: fake_ask)
+    monkeypatch.setattr(llm, "models", lambda: ["qwen3:8b"])
+    monkeypatch.setattr(cli, "fetch", lambda url: policy_page)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    cli.main(["status"])  # creates the database
+    con = sqlite3.connect(tmp_path / "data" / "art15.db")
+    con.execute("INSERT INTO senders VALUES ('mailer-shop.it', NULL, 3, '', '', 1, 'Order')")
+    con.commit()
+    capsys.readouterr()
+
+    cli.main(["find", "--no-browser"])
+    out = capsys.readouterr().out
+    assert secret in prompts[0] and "7781" not in out  # the local model read it; it went no further
+    record = (tmp_path / "data" / "records" / "mailer-shop-it.json").read_text()
+    assert "7781" not in record and "Segreta" not in record and "privacy@shop-italia.it" in record
+    assert con.execute("SELECT slug FROM senders").fetchone() == ("mailer-shop-it",)
+    assert con.execute("SELECT status, pages FROM lookups").fetchone() == ("email", 1)
+
+    cli.main(["find", "--no-browser"])  # a second run skips what was tried
+    assert "email" not in capsys.readouterr().out.split("Records")[0]
+    cli.main(["draft", "mailer-shop-it", "--dry-run"])
+    assert "privacy@shop-italia.it" in capsys.readouterr().out

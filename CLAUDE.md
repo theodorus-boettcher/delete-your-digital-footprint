@@ -17,7 +17,9 @@ Rules that are easy to miss:
 - Drafts only, never SMTP. `mail.py` appends to the Drafts folder; the user presses Send. Never add a send path.
 - Never attach or send ID documents. An ID request gets the Art. 12(6) reply draft.
 - Act only for the inbox owner: requests go from the account's own address only.
-- The scan reads headers only. Bodies are read only for replies from companies with an open request.
+- The scan reads headers only. Bodies are read only for replies from companies with an open request, and by
+  `art15 find`: the newest email of an unknown sender, for the local model. Its text is never stored or printed.
+- `art15 find`: no search engine. GET only: it never logs in, fills a form or gets around a block.
 - Network: IMAP, the datenanfragen pull and company websites. All models run on this machine (Ollama on
   127.0.0.1). No cloud model, ever: never add a cloud path or a key for one.
 - The model sees field names and counts from exports, never values.

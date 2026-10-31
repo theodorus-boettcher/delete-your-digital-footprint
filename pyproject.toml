@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "beautifulsoup4",
     "httpx",
+    "playwright>=1.64.1",
     "pymupdf",
     "tldextract",
 ]
