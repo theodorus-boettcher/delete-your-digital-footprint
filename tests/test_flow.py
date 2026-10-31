@@ -181,6 +181,13 @@ def test_find_keeps_no_email_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert con.execute("SELECT slug FROM senders").fetchone() == ("mailer-shop-it",)
     assert con.execute("SELECT status, pages FROM lookups").fetchone() == ("email", 1)
 
+    con.execute("INSERT INTO senders VALUES ('shop-italia.it', NULL, 2, '', '', 1, 'Order')")  # the same company again
+    con.commit()
+    capsys.readouterr()
+    cli.main(["find", "--no-browser"])
+    assert "same address as mailer-shop-it" in capsys.readouterr().out
+    assert not (tmp_path / "data" / "records" / "shop-italia-it.json").exists()
+
     cli.main(["find", "--no-browser"])  # a second run skips what was tried
     assert "email" not in capsys.readouterr().out.split("Records")[0]
     cli.main(["draft", "mailer-shop-it", "--dry-run"])

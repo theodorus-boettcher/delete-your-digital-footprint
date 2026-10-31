@@ -15,7 +15,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from art15.audit import policy_text, verified
-from art15.companies import registrable
+from art15.companies import FREEMAIL, registrable
 from art15.llm import Ask
 
 Read = Callable[[str], str]
@@ -36,6 +36,9 @@ EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}", re.I)
 OTHER_LAW = re.compile(r"brazil|brasil|lgpd|california|ccpa|canad|australia|japan|korea|china|india|\bdsa\b|digital services act", re.I)
 # Sample text in privacy portal pages ("Generitech Privacy, 123 Main Street"), not anyone's address.
 PLACEHOLDER = re.compile(r"generitech|@example\.|@(?:your)?(?:company|domain)\.", re.I)
+PEC = re.compile(r"@(?:[\w-]+\.)*(?:pec|legalmail)\.", re.I)  # Italian certified mail: refuses ordinary email
+# Boxes for something else, whatever the page around them says.
+WRONG_BOX = re.compile(r"security|abuse|sales|sponsor|marketing|press|jobs|career|billing|no-?reply|donotreply|partner|advert|assicurazioni|insurance", re.I)
 PORTAL = re.compile(r"onetrust|trustarc|privacy-?portal|transcend|securiti|datagrail|ketch|^privacy\.", re.I)
 WEBFORM = re.compile(r"\bform\b|webform|formular|modulo|portal|request|richiesta|anfrage|onetrust|trustarc", re.I)
 BOT_WALL = re.compile(r"just a moment|verify you are human|are you human|attention required|access denied|captcha", re.I)
@@ -62,7 +65,8 @@ Below is text from {url} and numbered links from that page.
   "address" and copy the sentence with it word for word in "quote".
 - If it points to a web form or privacy portal for data requests, put that link's number in "webform_link".
 - Otherwise put in "next_link" the number of the link most likely to lead to one.
-Use 0 for no link. Never guess or build an address.
+Use 0 for no link. Never guess or build an address. Leave "address" empty for addresses meant for sales, sponsorship,
+security reports, press, jobs, authorities or another company.
 
 TEXT:
 {text}
@@ -73,6 +77,17 @@ SCHEMA = {"type": "object", "properties": {"address": {"type": "string"}, "quote
                                            "webform_link": {"type": "integer"}, "next_link": {"type": "integer"}},
           "required": ["address", "quote", "webform_link", "next_link"]}
 
+
+PURPOSE = """Someone wants to send {company} a GDPR request for a copy of their personal data.
+A web page of the company says:
+<<<
+{around}
+>>>
+What is the address {address} for, according to this text?
+- privacy: privacy or personal data questions and requests of {company} (privacy team, data protection officer, EU representative)
+- general: {company}'s general contact, given as the way to reach it about this text
+- other: anything else (sales, sponsorship, security reports, legal notices, press, jobs, or a different company)"""
+PURPOSE_SCHEMA = {"type": "object", "properties": {"use": {"enum": ["privacy", "general", "other"]}}, "required": ["use"]}
 
 # One bad answer costs a page, not the run. A model that is down is not in here: that must stop the run.
 BAD_ANSWER = (httpx.HTTPStatusError, httpx.TimeoutException, ValueError, KeyError)
@@ -114,7 +129,8 @@ def read_page(url: str, get: Read, browse: Read | None = None) -> str:
     except (httpx.HTTPError, httpx.InvalidURL, ValueError):
         pass
     text = policy_text(html)
-    if len(text) >= THIN:
+    hidden = "email-protection" in html  # Cloudflare hides addresses until a browser runs the page
+    if len(text) >= THIN and not (hidden and browse):
         return html
     if BOT_WALL.search(text):
         raise Refused(url)
@@ -125,12 +141,16 @@ def read_page(url: str, get: Read, browse: Read | None = None) -> str:
     return rendered or html
 
 
+def _mailable(address: str) -> bool:
+    return not PLACEHOLDER.search(address) and not PEC.search(address)
+
+
 def _hits(text: str, url: str) -> list[Found]:
     text = re.sub(r"\s*[\[(]at[\])]\s*", "@", text, flags=re.I)
     out = []
     for m in EMAIL.finditer(text):
         quote = re.sub(r"<[^>]+>|\s+", " ", text[max(0, m.start() - 120): m.end() + 60]).strip()
-        if PRIVACY_BOX.search(m.group().split("@")[0]) and not OTHER_LAW.search(quote) and not PLACEHOLDER.search(m.group()):
+        if PRIVACY_BOX.search(m.group().split("@")[0]) and not OTHER_LAW.search(quote) and _mailable(m.group()):
             out.append(Found(m.group().lower().rstrip("."), url, quote))
     return out
 
@@ -189,11 +209,27 @@ def _pick(n: Any, links: list[tuple[str, str]]) -> str:
     return links[n - 1][0] if isinstance(n, int) and 1 <= n <= len(links) else ""
 
 
-def _proven(address: str, quote: str, text: str, site: str) -> bool:
-    """The evidence rule: the address sits inside a sentence found word for word on the page."""
+def _proven(address: str, quote: str, text: str, site: str, url: str) -> bool:
+    """The evidence rule: the address sits inside a sentence found word for word on the page. A box without a
+    privacy word in it counts only on a privacy page: on a homepage or contact page it is just some address."""
+    box, domain = address.split("@")[0], registrable(address.split("@")[-1])
     return (EMAIL.fullmatch(address) is not None and address in quote.lower() and verified(quote, text)
-            and not OTHER_LAW.search(quote) and not PLACEHOLDER.search(address)
-            and (site in PLATFORMS or registrable(address.split("@")[1]) not in PLATFORMS))
+            and not OTHER_LAW.search(quote) and _mailable(address) and domain not in FREEMAIL
+            and not WRONG_BOX.search(box) and (PRIVACY_BOX.search(box) is not None or PRIVACY_PAGE.search(url) is not None)
+            and (site in PLATFORMS or domain not in PLATFORMS))
+
+
+def _purpose(company: str, address: str, around: str, ask: Ask) -> str:
+    """A second, narrow question: finding an address and judging it are different jobs."""
+    try:
+        return str(ask(PURPOSE.format(company=company, address=address, around=around), PURPOSE_SCHEMA).get("use", "other"))
+    except BAD_ANSWER:
+        return "other"
+
+
+def _context(text: str, address: str, fallback: str) -> str:
+    i = text.lower().find(address)
+    return text[max(0, i - 400): i + 200] if i >= 0 else fallback
 
 
 def _consult(company: str, url: str, html: str, links: list[tuple[str, str]], site: str, ask: Ask) -> tuple[Found | None, str]:
@@ -206,7 +242,7 @@ def _consult(company: str, url: str, html: str, links: list[tuple[str, str]], si
         return None, ""
     written, quote = EMAIL.search(str(out.get("address", ""))), str(out.get("quote", ""))
     address = written.group().lower() if written else ""  # the model may add words around it ("Email us: ...")
-    if address and _proven(address, quote, text, site):
+    if address and _proven(address, quote, text, site, url) and _purpose(company, address, _context(text, address, quote), ask) != "other":
         return Found(address, url, quote), ""
     form, follow = _pick(out.get("webform_link"), links), _pick(out.get("next_link"), links)
     label = f"{form} {dict(links).get(form, '')}"
@@ -233,14 +269,15 @@ def walk(site: str, company: str, read: Read, ask: Ask | None, also: set[str] | 
         return html
 
     domains = {site, *(also or set())}
-    rules = _walk(site, company, once, None, domains)
+    rules = _walk(site, company, once, None, ask, domains)
     if rules.found or ask is None or rules.status == "blocked":
         return rules
-    return _walk(site, company, once, ask, domains)
+    return _walk(site, company, once, ask, ask, domains)
 
 
-def _walk(site: str, company: str, read: Read, ask: Ask | None, domains: set[str]) -> Lookup:
-    """Read the company's site until a contact turns up or the pages run out."""
+def _walk(site: str, company: str, read: Read, ask: Ask | None, judge: Ask | None, domains: set[str]) -> Lookup:
+    """Read the company's site until a contact turns up or the pages run out. `ask` steers, `judge` checks
+    rule hits at other domains: a policy also lists third parties (Marketo on Amazon's page)."""
     home = f"https://{site}/"
     # Some sites only work with www. (real-solution.de: a bad certificate without it).
     queue, guesses = [home], [f"https://www.{site}/", urljoin(home, "/privacy"), urljoin(home, "/privacy-policy")]
@@ -265,8 +302,12 @@ def _walk(site: str, company: str, read: Read, ask: Ask | None, domains: set[str
         if not html:
             continue
         pages.append(url)
-        if found := privacy_email(html, url, site):
-            return Lookup("email", found, pages)
+        found = privacy_email(html, url, site)
+        if found:
+            domain = registrable(found.email.split("@")[1])
+            own = domain in domains or site.split(".")[0] in domain
+            if own or judge is None or _purpose(company, found.email, _context(policy_text(html), found.email, found.quote), judge) != "other":
+                return Lookup("email", found, pages)
         links = candidate_links(html, url, seen, domains)
         follow = ""
         if ask is not None:

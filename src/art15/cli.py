@@ -272,6 +272,7 @@ def find_all(ctx: Ctx, args: argparse.Namespace) -> None:
         need_model()
     known = {r["slug"] for r in ctx.con.execute("SELECT DISTINCT slug FROM senders WHERE slug IS NOT NULL")}
     counts: Counter[str] = Counter()
+    by_email = {r["email"].lower(): s for s, r in ctx.companies.records.items() if r.get("email")}
     with Browser() if not args.no_browser else nullcontext(None) as browser:
         read = page_reader(browser)
         for i, dom in enumerate(todo, 1):
@@ -282,8 +283,11 @@ def find_all(ctx: Ctx, args: argparse.Namespace) -> None:
             else:
                 r = finder.walk(site, company, read, ask, {dom})
                 status, pages, note = r.status, len(r.pages), ""
-                if r.found:
+                if r.found and (slug := by_email.get(r.found.email)):  # one company, one request
+                    status, note = "list", f"same address as {slug}"
+                elif r.found:
                     slug = write_record(dom, site, company, r)
+                    by_email[r.found.email] = slug
                     note = f"{r.found.webform or r.found.email}  ({r.how}) {r.found.url}\n{'':<6}\"{r.found.quote[:160]}\""
             if slug:
                 ctx.con.execute("UPDATE senders SET slug = ? WHERE domain = ?", (slug, dom))

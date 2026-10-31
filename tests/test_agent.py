@@ -10,8 +10,8 @@ PAD = "<p>" + "Some words about how this shop works. " * 60 + "</p>"
 HOME = '<a href="/privacy">Privacy</a><a href="/privacy#rights">Your rights</a><a href="/jobs">Jobs</a>' + PAD
 
 
-def answer(address: str = "", quote: str = "", form: int = 0, follow: int = 0) -> Ask:
-    return lambda prompt, schema: {"address": address, "quote": quote, "webform_link": form, "next_link": follow}
+def answer(address: str = "", quote: str = "", form: int = 0, follow: int = 0, use: str = "privacy") -> Ask:
+    return lambda prompt, schema: {"address": address, "quote": quote, "webform_link": form, "next_link": follow, "use": use}
 
 
 def site(pages: dict[str, str]) -> finder.Read:
@@ -46,7 +46,7 @@ def test_pages_are_read_once() -> None:
 
 def test_model_address_needs_proof() -> None:
     page = "<p>Our EU representative is Prighter, reachable at rep_shop@prighter.com for all requests.</p>" + PAD
-    pages = {"https://shop.it/": page}
+    pages = {"https://shop.it/": '<a href="/privacy">Privacy</a>' + PAD, "https://shop.it/privacy": page}
     good = "Our EU representative is Prighter, reachable at rep_shop@prighter.com for all requests."
     r = finder.walk("shop.it", "Shop", site(pages), answer("rep_shop@prighter.com", good))
     assert r.found is not None and (r.status, r.how, r.found.email) == ("email", "agent", "rep_shop@prighter.com")
@@ -62,7 +62,7 @@ def test_model_address_needs_proof() -> None:
 
 def test_address_with_words_around_it() -> None:
     line = "If you have a question about your data, please contact hello@shop.it at any time."
-    pages = {"https://shop.it/": f"<p>{line}</p>" + PAD}
+    pages = {"https://shop.it/": '<a href="/privacy">Privacy</a>' + PAD, "https://shop.it/privacy": f"<p>{line}</p>" + PAD}
     r = finder.walk("shop.it", "Shop", site(pages), answer("Email us: hello@shop.it", line))
     assert r.found is not None and r.found.email == "hello@shop.it"
 
@@ -82,6 +82,37 @@ def test_real_mistakes_from_the_first_real_run() -> None:
     dsa = "Pursuant to Article 11 of the DSA, Shop has designated legal@shop.it as its Point of Contact for authorities."
     pages = {"https://shop.it/": f"<p>{dsa}</p>" + PAD}  # Hinge
     assert finder.walk("shop.it", "Shop", site(pages), answer("legal@shop.it", dsa)).found is None
+
+
+def test_the_kind_of_address_counts_not_just_the_proof() -> None:
+    def on_privacy_page(line: str) -> dict[str, str]:
+        return {"https://shop.it/": '<a href="/privacy">Privacy</a>' + PAD, "https://shop.it/privacy": f"<p>{line}</p>" + PAD}
+
+    for line, address in [("SPONSORSHIP ENQUIRIES someone@gmail.com please", "someone@gmail.com"),  # a personal address
+                          ("Certified mail: ag.assicurazioni@pec.shop.it for agents", "ag.assicurazioni@pec.shop.it"),  # Wind Tre
+                          ("Contact: mailto:security@shop.it for reports", "security@shop.it")]:  # ngrok
+        assert finder.walk("shop.it", "Shop", site(on_privacy_page(line)), answer(address, line)).found is None
+    home = {"https://shop.it/": "<p>Write to us at hello@shop.it any time you like.</p>" + PAD}
+    assert finder.walk("shop.it", "Shop", site(home), answer("hello@shop.it", "Write to us at hello@shop.it any time you like.")).found is None
+    line = "If you have questions about this policy, write to hello@shop.it at any time."
+    assert finder.walk("shop.it", "Shop", site(on_privacy_page(line)), answer("hello@shop.it", line, use="other")).found is None
+    assert finder.walk("shop.it", "Shop", site(on_privacy_page(line)), answer("hello@shop.it", line, use="general")).found is not None
+
+
+def test_rule_hits_at_other_domains_are_judged() -> None:
+    page = "<p>Transfers: Marketo (privacyofficer@marketo.com) United States, for marketing emails.</p>" + PAD  # Amazon
+    pages = {"https://shop.it/": page}
+    assert finder.walk("shop.it", "Shop", site(pages), None).found is not None  # rules alone can't tell
+    assert finder.walk("shop.it", "Shop", site(pages), answer(use="other")).found is None
+    assert finder.walk("shop.it", "Shop", site(pages), answer(use="privacy")).found is not None  # an outside DPO firm is fine
+    own = {"https://shop.it/": "<p>Write to dpo@shop.it</p>" + PAD}
+    assert finder.walk("shop.it", "Shop", site(own), answer(use="other")).found is not None  # the company's own domain needs no judge
+
+
+def test_cloudflare_pages_open_in_the_browser() -> None:
+    hidden = '<a href="/cdn-cgi/l/email-protection#ab">[email protected]</a>' + PAD
+    assert finder.read_page("u", lambda u: hidden, lambda u: "<p>dpo@shop.it</p>") == "<p>dpo@shop.it</p>"
+    assert finder.read_page("u", lambda u: hidden, None) == hidden
 
 
 def test_model_sees_clean_links_and_cannot_invent_one() -> None:
