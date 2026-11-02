@@ -1,11 +1,12 @@
-"""IMAP only: read headers, find sent letters and replies, put drafts in the Drafts folder.
+"""Mail: read headers, find sent letters and replies, put drafts in the Drafts folder.
 
-Nothing here can send mail. Drafts are appended to the Drafts folder and the user presses Send.
+IMAP for all of that. SMTP only in `send`, which only `art15 send` calls, after the user typed the confirmation.
 """
 
 import email
 import imaplib
 import re
+import smtplib
 import time
 from collections.abc import Iterator
 from datetime import date, datetime
@@ -78,6 +79,22 @@ def append_draft(imap: imaplib.IMAP4, msg: EmailMessage) -> None:
     typ, data = imap.append(folder(imap, r"\Drafts"), r"(\Draft)", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
     if typ != "OK":
         raise RuntimeError(f"draft not saved: {data!r}")
+
+
+def drop_draft(imap: imaplib.IMAP4, msgid: str) -> None:
+    """Delete our draft with this exact Message-ID, so a letter `art15 send` sends can't also go out by hand."""
+    imap.select(folder(imap, r"\Drafts"))
+    _, data = imap.uid("SEARCH", "HEADER", "Message-ID", f'"{msgid}"')
+    for uid in data[0].split() if data and data[0] else []:
+        imap.uid("STORE", uid.decode(), "+FLAGS", r"(\Deleted)")
+    imap.expunge()
+
+
+def send(host: str, user: str, password: str, msg: EmailMessage) -> None:
+    # A new connection per letter: they go out 30 s apart, too slow to keep one open for a long run.
+    with smtplib.SMTP_SSL(host, 465, timeout=60) as smtp:
+        smtp.login(user, password)
+        smtp.send_message(msg)
 
 
 def draft(sender: str, to: str, subject: str, body: str, attachments: dict[str, str] | None = None) -> EmailMessage:

@@ -1,15 +1,19 @@
 """The whole loop on a fake mailbox: draft -> sent -> reply -> deadline -> reminder -> complaint."""
 
+import argparse
 import builtins
+import json
 import re
+import smtplib
 import sqlite3
 from email import message_from_bytes, policy
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from art15 import cli, llm, mail
+from art15 import cli, llm, mail, ticks
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -18,6 +22,7 @@ class FakeIMAP:
     def __init__(self, inbox: list[bytes]) -> None:
         self.inbox, self.box = inbox, ""
         self.appended: builtins.list[bytes] = []
+        self.dropped: builtins.list[str] = []
 
     def list(self) -> tuple[str, builtins.list[bytes]]:
         return "OK", [b'(\\HasNoChildren \\All) "/" "[Gmail]/All Mail"', b'(\\HasNoChildren \\Sent) "/" "[Gmail]/Sent Mail"',
@@ -28,10 +33,19 @@ class FakeIMAP:
         return "OK", [b"1"]
 
     def uid(self, cmd: str, *args: str) -> tuple[str, builtins.list[Any]]:
+        if cmd == "STORE":
+            self.dropped.append(args[0])
+            return "OK", []
+        if cmd == "SEARCH" and "Drafts" in self.box:  # drop_draft: one draft by its exact Message-ID
+            found = [str(i + 1).encode() for i, d in enumerate(self.appended) if args[-1].strip('"').encode() in d]
+            return "OK", [b" ".join(found)]
         if cmd == "SEARCH":  # every search in All Mail returns the whole inbox; sync must filter
             hits = [str(i + 1).encode() for i in range(len(self.inbox))] if "All Mail" in self.box else []
             return "OK", [b" ".join(hits)]
         return "OK", [(b"x", self.inbox[int(i) - 1]) for i in args[0].split(",")]
+
+    def expunge(self) -> tuple[str, builtins.list[bytes]]:
+        return "OK", []
 
     def append(self, box: str, flags: str, when: str, data: bytes) -> tuple[str, builtins.list[bytes]]:
         assert box == '"[Gmail]/Drafts"' and flags == r"(\Draft)"
@@ -207,3 +221,173 @@ def test_a_bounced_request_gets_no_reminder(tmp_path: Path, monkeypatch: pytest.
     assert con.execute("SELECT status FROM requests").fetchone() == ("bounced",)
     cli.main(["--now", "2026-12-20", "sync"])  # past the deadline
     assert len(imap.appended) == drafts
+
+
+class FakeScreen:
+    def __init__(self, keys: str) -> None:
+        self.keys = [ord(k) for k in keys]
+        self.lines: list[str] = []
+
+    def getmaxyx(self) -> tuple[int, int]:
+        return 24, 100
+
+    def addnstr(self, y: int, x: int, text: str, n: int, attr: int = 0) -> None:
+        self.lines.append(text)
+
+    def erase(self) -> None:
+        pass
+
+    def refresh(self) -> None:
+        pass
+
+    def getch(self) -> int:
+        return self.keys.pop(0)
+
+
+def senders_with_records(tmp_path: Path, emails: dict[str, str]) -> sqlite3.Connection:
+    """One own record and one likely-account sender per domain."""
+    (tmp_path / "data" / "records").mkdir(parents=True, exist_ok=True)
+    cli.main(["status"])  # creates the database
+    con = sqlite3.connect(tmp_path / "data" / "art15.db")
+    con.row_factory = sqlite3.Row
+    for i, (dom, email) in enumerate(emails.items()):
+        slug = dom.replace(".", "-")
+        rec = {"slug": slug, "name": slug, "web": f"https://{dom}/", "runs": [dom], "quality": "found", "email": email}
+        (tmp_path / "data" / "records" / f"{slug}.json").write_text(json.dumps(rec))
+        con.execute("INSERT INTO senders VALUES (?,?,?,?,?,?,?)", (dom, slug, 10 - i, "", "", 1, "Welcome"))
+    con.commit()
+    return con
+
+
+def choose(con: sqlite3.Connection, *slugs: str) -> None:
+    con.executemany("INSERT OR REPLACE INTO choices VALUES (?, 1)", [(s,) for s in slugs])
+    con.commit()
+
+
+def fake_send(monkeypatch: pytest.MonkeyPatch, answer: str = "") -> list[EmailMessage]:
+    sent: list[EmailMessage] = []
+    monkeypatch.setattr(mail, "send", lambda host, user, password, msg: sent.append(msg))
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: answer)
+    return sent
+
+
+def test_review_starts_risky_ones_unticked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    fake_home(tmp_path, monkeypatch, [])
+    con = senders_with_records(tmp_path, {"safe.it": "privacy@safe.it", "plain.it": "info@plain.it",
+                                          "amazonaws.com": "privacyofficer@marketo.com", "wind.it": "dpo@pec.wind.it"})
+    rows = cli.review_rows(cli.Ctx(argparse.Namespace(now=None)))
+    assert {r.slug: (r.ticked, r.note) for r in rows} == {
+        "safe-it": (True, "privacy address"), "plain-it": (False, "! general address"),
+        "amazonaws-com": (False, "! address at another company"), "wind-it": (False, "! certified mail, may refuse Gmail")}
+
+    assert ticks.tick(FakeScreen("nj q"), rows) is False  # q leaves; the caller saves nothing
+    monkeypatch.setattr(ticks, "run", lambda rows: ticks.tick(FakeScreen("nj \n"), rows))  # none, down, tick the second, save
+    cli.main(["review"])
+    saved = {r["slug"]: r["chosen"] for r in con.execute("SELECT * FROM choices")}
+    assert saved == {"safe-it": 0, "plain-it": 1, "amazonaws-com": 0, "wind-it": 0}
+    assert "1 of 4 chosen" in capsys.readouterr().out
+    # The second review shows what was chosen, not the defaults again.
+    assert {r.slug: r.ticked for r in cli.review_rows(cli.Ctx(argparse.Namespace(now=None)))}["plain-it"] is True
+
+
+def test_send_needs_the_typed_number(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    fake_home(tmp_path, monkeypatch, [])
+    con = senders_with_records(tmp_path, {"safe.it": "privacy@safe.it"})
+    choose(con, "safe-it", "shop-uk", "google")  # google takes a web form only
+    for wrong in ("", "yes", "send 3", "send"):
+        sent = fake_send(monkeypatch, wrong)
+        cli.main(["--now", "2026-11-02", "send"])
+        assert not sent and not con.execute("SELECT 1 FROM requests").fetchone()
+
+    sent = fake_send(monkeypatch, "send 2")
+    cli.main(["--now", "2026-11-02", "send"])
+    assert sorted(m["To"] for m in sent) == ["privacy@safe.it", "privacy@shop.co.uk"]
+    rows = {r["slug"]: r for r in con.execute("SELECT * FROM requests")}
+    assert rows["safe-it"]["status"] == "sent" and rows["safe-it"]["deadline"] == "2026-12-02"
+    assert rows["google"]["status"] == "manual"
+    assert con.execute("SELECT COUNT(*) FROM letters WHERE sent_at IS NULL AND to_addr != ''").fetchone()[0] == 0
+    ours = {r["msgid"] for r in con.execute("SELECT msgid FROM letters")}
+    assert {m["Message-ID"] for m in sent} <= ours  # sync matches replies on these
+
+    capsys.readouterr()
+    cli.main(["--now", "2026-11-03", "send"])  # nothing goes twice
+    assert len(sent) == 2 and "Nothing to send" in capsys.readouterr().out
+    cli.main(["forms"])
+    assert "takeout.google.com" in capsys.readouterr().out
+
+
+def test_send_takes_letters_out_of_drafts_and_never_a_complaint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    imap = fake_home(tmp_path, monkeypatch, [])
+    cli.main(["--now", "2026-11-02", "draft", "shop-uk"])
+    con = sqlite3.connect(tmp_path / "data" / "art15.db")
+    ref = con.execute("SELECT ref FROM requests").fetchone()[0]
+    con.execute("INSERT INTO letters (ref, kind, to_addr, subject, body) VALUES (?, 'complaint', 'x@pec.gpdp.it', 's', 'b')", (ref,))
+    con.commit()
+    sent = fake_send(monkeypatch, "send 1")
+    cli.main(["--now", "2026-11-02", "send"])
+    assert [m["To"] for m in sent] == ["privacy@shop.co.uk"] and imap.dropped == ["1"]
+
+    # A reminder drafted before the company answered must not go out after it did.
+    con.execute("INSERT INTO letters (ref, kind, to_addr, subject, body, msgid) VALUES (?, 'admonition', 'p@shop.co.uk', 's', 'b', '<m@x>')", (ref,))
+    con.execute("UPDATE requests SET status = 'answered'")
+    con.commit()
+    sent.clear()
+    cli.main(["--now", "2026-11-20", "send"])
+    assert not sent
+    con.execute("UPDATE requests SET status = 'admonished'")  # still waiting: this one goes
+    con.commit()
+    sent = fake_send(monkeypatch, "send 1")
+    cli.main(["--now", "2026-11-20", "send"])
+    assert [m["To"] for m in sent] == ["p@shop.co.uk"]
+    assert con.execute("SELECT sent_at FROM letters WHERE kind = 'complaint'").fetchone()[0] is None
+
+
+def test_send_stops_on_bounces_and_on_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    imap = fake_home(tmp_path, monkeypatch, [])
+    con = senders_with_records(tmp_path, {"a.it": "privacy@a.it", "b.it": "privacy@b.it", "c.it": "privacy@c.it"})
+    choose(con, "a-it", "b-it", "c-it")
+    sent = fake_send(monkeypatch, "send 3")
+    monkeypatch.setattr(cli, "CHECK_EVERY", 1)
+    monkeypatch.setattr(cli, "MAX_BOUNCES", 1)
+
+    def bounce(host: str, user: str, password: str, msg: EmailMessage) -> None:
+        sent.append(msg)
+        imap.inbox.append(f"From: Mail Delivery Subsystem <mailer-daemon@googlemail.com>\r\nSubject: Failure\r\n\r\n{msg['Subject']}\r\n".encode())
+
+    monkeypatch.setattr(mail, "send", bounce)
+    with pytest.raises(SystemExit, match="1 came back"):
+        cli.main(["--now", "2026-11-02", "send"])
+    assert len(sent) == 1
+
+    def refused(host: str, user: str, password: str, msg: EmailMessage) -> None:
+        raise smtplib.SMTPServerDisconnected("gone")
+
+    monkeypatch.setattr(cli, "MAX_BOUNCES", 99)
+    monkeypatch.setattr("builtins.input", lambda prompt: "send 2")
+    monkeypatch.setattr(mail, "send", refused)
+    with pytest.raises(SystemExit, match="Stopped after 0 of 2: gone"):
+        cli.main(["--now", "2026-11-02", "send"])
+    assert con.execute("SELECT COUNT(*) FROM requests WHERE status = 'drafted'").fetchone()[0] == 2  # both still ready
+
+
+def test_start_skips_a_scan_that_is_done(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_home(tmp_path, monkeypatch, [])
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "cmd_setup", lambda ctx, args: calls.append("setup"))
+    monkeypatch.setattr(cli, "cmd_scan", lambda ctx, args: calls.append("scan"))
+    monkeypatch.setattr(cli, "cmd_find", lambda ctx, args: calls.append("find"))
+    cli.main(["start"])
+    assert calls == ["setup", "scan", "find"]
+    senders_with_records(tmp_path, {"a.it": "privacy@a.it"})
+    calls.clear()
+    cli.main(["start"])
+    assert calls == ["setup", "find"]
+
+
+def test_show_reads_a_letter_without_saving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    fake_home(tmp_path, monkeypatch, [])
+    cli.main(["show", "shop-uk"])
+    assert "Ada Rossi" in capsys.readouterr().out
+    con = sqlite3.connect(tmp_path / "data" / "art15.db")
+    assert not con.execute("SELECT 1 FROM requests").fetchone()

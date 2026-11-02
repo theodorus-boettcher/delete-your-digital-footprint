@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS lookups (
     domain TEXT PRIMARY KEY, status TEXT, pages INTEGER, tried_at TEXT
 );
+-- what the user ticked in `art15 review`; `art15 send` writes these requests
+CREATE TABLE IF NOT EXISTS choices (
+    slug TEXT PRIMARY KEY, chosen INTEGER
+);
 CREATE TABLE IF NOT EXISTS findings (
     id INTEGER PRIMARY KEY, ref TEXT NOT NULL, kind TEXT, item TEXT, status TEXT,
     quote TEXT, file TEXT, created_at TEXT

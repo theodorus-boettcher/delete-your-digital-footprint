@@ -9,6 +9,7 @@ import os
 import random
 import re
 import secrets
+import smtplib
 import sqlite3
 import subprocess
 import sys
@@ -24,7 +25,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from art15 import audit, db, evals, finder, letters, llm, mail, report
+from art15 import audit, db, evals, finder, letters, llm, mail, report, ticks
 from art15.browser import Browser
 from art15.classify import LABELS, Reply, classify, is_bounce
 from art15.companies import FREEMAIL, Companies, registrable
@@ -35,6 +36,11 @@ DATA = HOME / "data"
 DA = DATA / "datenanfragen"
 OWN = DATA / "records"  # records found by `art15 find` or written by hand, same format as datenanfragen
 REPO = "https://github.com/datenanfragen/data"
+
+PAUSE = 30  # seconds between letters: a burst can get a Gmail account flagged
+CHECK_EVERY, MAX_BOUNCES = 5, 3
+# The state a letter must be in to go out. Complaints are not here on purpose: those go to a regulator, by hand.
+SENDABLE = {"request": "drafted", "admonition": "admonished", "idreply": "id_requested"}
 
 ACCOUNT_LIKELY = re.compile(
     r"welcome|verify|verification|confirm|activate|your order|order confirm|receipt|invoice|password|your account|"
@@ -91,6 +97,9 @@ class Ctx:
 
     def imap(self) -> imaplib.IMAP4_SSL:
         return mail.connect(self.env.get("ART15_IMAP_HOST", "imap.gmail.com"), self.me, self.env["ART15_APP_PASSWORD"])
+
+    def send(self, msg: EmailMessage) -> None:
+        mail.send(self.env.get("ART15_SMTP_HOST", "smtp.gmail.com"), self.me, self.env["ART15_APP_PASSWORD"], msg)
 
     def lang(self, slug: str) -> str:
         rec = self.companies.records[slug]
@@ -229,7 +238,7 @@ def need_model() -> None:
     try:
         llm.models()
     except httpx.HTTPError:
-        sys.exit("Ollama is off: start it with `~/.local/opt/ollama/bin/ollama serve`, or pass --no-llm.")
+        sys.exit("Ollama is off: start it with `ollama serve`, then run this again.")
 
 
 def sender_identity(ctx: Ctx, dom: str, ask: llm.Ask) -> tuple[str, str]:
@@ -315,6 +324,57 @@ def save_letter(ctx: Ctx, ref: str, kind: str, msg: EmailMessage | None, to: str
     ctx.con.commit()
 
 
+def by_hand(rec: dict[str, Any]) -> bool:
+    return rec.get("suggested-transport-medium") == "webform" or not rec.get("email")
+
+
+def hand_address(rec: dict[str, Any]) -> str:
+    return str(rec.get("webform") or rec.get("address", "").replace("\n", ", "))
+
+
+def new_request(ctx: Ctx, slug: str, imap: imaplib.IMAP4 | None, dry_run: bool = False, show: bool = False) -> None:
+    """Write one request. With `imap` it also lands in Gmail Drafts; without it, it waits for `art15 send`."""
+    rec = ctx.companies.records.get(slug)
+    if rec is None:
+        print(f"{slug}: no such company record")
+        return
+    if ctx.con.execute("SELECT 1 FROM requests WHERE slug = ? AND status NOT IN ('cancelled', 'closed', 'bounced')",
+                       (slug,)).fetchone():
+        print(f"{slug}: already has a request")
+        return
+    ref, lang = new_ref(ctx.con), ctx.lang(slug)
+    body, missing = letters.access_request(DA, rec, lang, ctx.name, ctx.me)
+    subject = letters.subject("access", lang, ref)
+    medium = rec.get("suggested-transport-medium", "email")
+    notes = []
+    if missing:
+        notes.append(f"they also ask for: {', '.join(missing)} (add it to the draft if you have it)")
+    if rec.get("needs-id-document"):
+        notes.append("their record says they want an ID document; art15 never sends one (Art. 12(6))")
+    if by_hand(rec):
+        path = DATA / "letters" / f"{ref}-{slug}.txt"
+        if not dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"Subject: {subject}\n\n{body}")
+        notes.insert(0, f"by hand: {hand_address(rec)} (letter text in {path.relative_to(HOME)}); then `art15 mark {ref} sent`")
+        status, msg, to = "manual", None, ""
+    else:
+        to = rec["email"]
+        msg = mail.draft(ctx.me, to, subject, body)
+        if imap:
+            mail.append_draft(imap, msg)
+        status = "drafted"
+    if not dry_run:
+        ctx.con.execute("INSERT INTO requests (ref, slug, status, medium, created_at) VALUES (?,?,?,?,?)",
+                        (ref, slug, status, "email" if msg else medium, ctx.today.isoformat()))
+        save_letter(ctx, ref, "request", msg, to, subject, body)
+    print(f"{ref}  {slug:<24} {status:<8} {to}")
+    for note in notes:
+        print(f"        {note}")
+    if dry_run and show:
+        print(body)
+
+
 def cmd_draft(ctx: Ctx, args: argparse.Namespace) -> None:
     slugs = list(args.slugs)
     if args.top:
@@ -323,49 +383,194 @@ def cmd_draft(ctx: Ctx, args: argparse.Namespace) -> None:
         slugs += [r["slug"] for r in rows if r["slug"] not in slugs][: args.top]
     imap = None if args.dry_run else ctx.imap()
     for slug in slugs:
-        rec = ctx.companies.records.get(slug)
-        if rec is None:
-            print(f"{slug}: no such company record")
-            continue
-        if ctx.con.execute("SELECT 1 FROM requests WHERE slug = ? AND status NOT IN ('cancelled', 'closed', 'bounced')",
-                           (slug,)).fetchone():
-            print(f"{slug}: already has a request")
-            continue
-        ref, lang = new_ref(ctx.con), ctx.lang(slug)
-        body, missing = letters.access_request(DA, rec, lang, ctx.name, ctx.me)
-        subject = letters.subject("access", lang, ref)
-        medium = rec.get("suggested-transport-medium", "email")
-        notes = []
-        if missing:
-            notes.append(f"they also ask for: {', '.join(missing)} (add it to the draft if you have it)")
-        if rec.get("needs-id-document"):
-            notes.append("their record says they want an ID document; art15 never sends one (Art. 12(6))")
-        if medium == "webform" or not rec.get("email"):
-            path = DATA / "letters" / f"{ref}-{slug}.txt"
-            if not args.dry_run:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(f"Subject: {subject}\n\n{body}")
-            where = rec.get("webform") or rec.get("address", "").replace("\n", ", ")
-            notes.insert(0, f"by hand: {where} (letter text in {path.relative_to(HOME)}); then `art15 mark {ref} sent`")
-            status, msg, to = "manual", None, ""
-        else:
-            to = rec["email"]
-            msg = mail.draft(ctx.me, to, subject, body)
-            if imap:
-                mail.append_draft(imap, msg)
-            status = "drafted"
-        if not args.dry_run:
-            ctx.con.execute("INSERT INTO requests (ref, slug, status, medium, created_at) VALUES (?,?,?,?,?)",
-                            (ref, slug, status, "email" if msg else medium, ctx.today.isoformat()))
-            save_letter(ctx, ref, "request", msg, to, subject, body)
-        print(f"{ref}  {slug:<24} {status:<8} {to}")
-        for note in notes:
-            print(f"        {note}")
-        if args.dry_run and args.show:
-            print(body)
+        new_request(ctx, slug, imap, args.dry_run, args.show)
     if imap:
         imap.logout()
-        print("\nThe drafts are in your Gmail Drafts folder. Read them, then press Send.")
+        print("\nThe drafts are in your Gmail Drafts folder. Read them, then press Send, or run `art15 send`.")
+
+
+# ---------- start, review, send ----------
+
+
+def cmd_start(ctx: Ctx, args: argparse.Namespace) -> None:
+    """The first run in one command. Safe to stop and run again: it picks up where it stopped."""
+    cmd_setup(ctx, args)
+    if not ctx.con.execute("SELECT 1 FROM senders LIMIT 1").fetchone():
+        print("\nFinding companies in your mail (headers only).")
+        try:
+            cmd_scan(ctx, argparse.Namespace(limit=15))
+        except (imaplib.IMAP4.error, OSError) as e:
+            sys.exit(f"Could not read your mail ({e}). Fix the login above, then run `art15 start` again.")
+    print("\nLooking up privacy contacts. If you stop this, run `art15 start` again and it carries on.")
+    cmd_find(ctx, argparse.Namespace(top=0, retry=False, no_llm=False, no_browser=False))
+    print("\nNext: uv run art15 review")
+
+
+def warning(ctx: Ctx, slug: str, domains: set[str]) -> str:
+    """Why a company starts unticked in `art15 review`. Empty when it looks safe."""
+    rec = ctx.companies.records[slug]
+    if missing := letters.id_data(rec, "", "")[1]:
+        return f"they ask for: {missing[0]}"
+    if rec.get("needs-id-document"):
+        return "their record wants an ID"
+    if by_hand(rec):
+        return "" if rec.get("webform") else "by post"
+    email = rec["email"]
+    if finder.PEC.search(email):
+        return "certified mail, may refuse Gmail"
+    if rec.get("quality") in ("verified", "tested"):
+        return ""
+    if not finder.PRIVACY_BOX.search(email.rsplit("@", 1)[0]):
+        return "general address"
+    if registrable(email.rsplit("@", 1)[1]) not in domains | ctx.companies.domains(slug):
+        return "address at another company"
+    return ""
+
+
+def review_rows(ctx: Ctx) -> list[ticks.Row]:
+    taken = {r["slug"] for r in ctx.con.execute("SELECT slug FROM requests WHERE status != 'cancelled'")}
+    saved = {r["slug"]: r["chosen"] for r in ctx.con.execute("SELECT slug, chosen FROM choices")}
+    rows = []
+    for r in ctx.con.execute("SELECT slug, SUM(msgs) AS msgs, GROUP_CONCAT(domain) AS domains FROM senders "
+                             "WHERE slug IS NOT NULL AND account_likely = 1 GROUP BY slug ORDER BY SUM(msgs) DESC"):
+        slug = r["slug"]
+        rec = ctx.companies.records.get(slug)
+        if rec is None or slug in taken:
+            continue
+        warn = warning(ctx, slug, set(r["domains"].split(",")))
+        contact = "web form" if by_hand(rec) and rec.get("webform") else rec.get("email") or "by post"
+        note = f"! {warn}" if warn else "by hand" if by_hand(rec) else "public list" if rec.get("quality") == "verified" else "privacy address"
+        detail = str((rec.get("comments") or rec.get("sources") or [""])[0])
+        rows.append(ticks.Row(slug, rec["name"], contact, r["msgs"], note, bool(warn), bool(saved.get(slug, not warn)), detail))
+    return rows
+
+
+def cmd_review(ctx: Ctx, args: argparse.Namespace) -> None:
+    rows = review_rows(ctx)
+    if not rows:
+        sys.exit("Nothing to review: run `art15 start` first.")
+    if not ticks.run(rows):
+        print("Nothing saved.")
+        return
+    ctx.con.executemany("INSERT OR REPLACE INTO choices VALUES (?,?)", [(r.slug, int(r.ticked)) for r in rows])
+    ctx.con.commit()
+    lost = ctx.con.execute("SELECT COUNT(*) FROM senders WHERE slug IS NULL AND account_likely = 1").fetchone()[0]
+    print(f"{sum(r.ticked for r in rows)} of {len(rows)} chosen. {lost} more have no contact we could find.")
+    print("Next: uv run art15 send")
+
+
+def unsent(ctx: Ctx) -> list[sqlite3.Row]:
+    rows = ctx.con.execute("SELECT l.*, r.slug, r.status FROM letters l JOIN requests r USING (ref) "
+                           "WHERE l.sent_at IS NULL AND l.to_addr != '' ORDER BY l.id").fetchall()
+    return [lt for lt in rows if SENDABLE.get(lt["kind"]) == lt["status"]]
+
+
+def record_sent(ctx: Ctx, lt: sqlite3.Row, sent: str) -> None:
+    ctx.con.execute("UPDATE letters SET sent_at = ? WHERE id = ?", (sent, lt["id"]))
+    ctx.con.commit()
+    if lt["kind"] == "request":
+        db.set_status(ctx.con, lt["ref"], "sent", sent_at=sent, deadline=request_deadline(date.fromisoformat(sent)).isoformat())
+    print(f"{lt['ref']}: {lt['kind']} sent {sent}")
+
+
+def mark_sent(ctx: Ctx, imap: imaplib.IMAP4) -> None:
+    """Which of our letters left the Sent folder's way: pressed in Gmail, or a run cut off after the send."""
+    for lt in ctx.con.execute("SELECT * FROM letters WHERE sent_at IS NULL AND to_addr != ''").fetchall():
+        for msg in mail.messages(imap, r"\Sent", "SUBJECT", lt["ref"]):
+            if " ".join(mail.header(msg, "Subject").split()) == " ".join(lt["subject"].split()):
+                record_sent(ctx, lt, (mail.msg_date(msg) or datetime.now()).date().isoformat())
+                break
+
+
+def bounced(ctx: Ctx, refs: list[str]) -> list[str]:
+    """Which of these came back already. `sync` records them; this only decides whether to keep going."""
+    imap = ctx.imap()
+    since = mail.imap_date(ctx.today)
+    back = [m for who in ("mailer-daemon", "postmaster") for m in mail.messages(imap, r"\All", "SINCE", since, "FROM", who)]
+    imap.logout()
+    return [ref for ref in refs if any(is_bounce(m) and ref.encode() in m.as_bytes() for m in back)]
+
+
+def send_letters(ctx: Ctx, todo: list[sqlite3.Row]) -> None:
+    sent: list[str] = []
+    rest = "The rest stay ready: `art15 send` carries on."
+    try:
+        for i, lt in enumerate(todo, 1):
+            msg = mail.draft(ctx.me, lt["to_addr"], lt["subject"], lt["body"])
+            msg.replace_header("Message-ID", lt["msgid"])  # `sync` matches replies on it
+            # shortcut: an ID reply goes without In-Reply-To; its subject still carries the ref, so sync finds the answer.
+            ctx.send(msg)
+            record_sent(ctx, lt, ctx.today.isoformat())
+            sent.append(lt["ref"])
+            if i % CHECK_EVERY == 0 and len(back := bounced(ctx, sent)) >= MAX_BOUNCES:
+                sys.exit(f"Stopped after {len(sent)}: {len(back)} came back ({', '.join(back)}). Run `art15 sync`, "
+                         f"fix those addresses or `art15 mark <ref> cancelled`. {rest}")
+            if i < len(todo):
+                time.sleep(PAUSE)
+    except (smtplib.SMTPException, OSError, imaplib.IMAP4.error) as e:
+        sys.exit(f"Stopped after {len(sent)} of {len(todo)}: {e}. {rest}")
+    except KeyboardInterrupt:
+        sys.exit(f"\nStopped after {len(sent)} of {len(todo)}. {rest}")
+
+
+def cmd_send(ctx: Ctx, args: argparse.Namespace) -> None:
+    imap = ctx.imap()
+    mark_sent(ctx, imap)  # what left by hand since the last sync must not go twice
+    records = ctx.companies.records
+    new = [r["slug"] for r in ctx.con.execute("SELECT slug FROM choices WHERE chosen = 1 AND slug NOT IN "
+                                              "(SELECT slug FROM requests WHERE status != 'cancelled') ORDER BY slug")
+           if r["slug"] in records]
+    emails = [s for s in new if not by_hand(records[s])]
+    ready = unsent(ctx)
+    count, forms = len(emails) + len(ready), len(new) - len(emails)
+    if not count and not forms:
+        print("Nothing to send: tick companies with `art15 review`.")
+        imap.logout()
+        return
+    if count:
+        for s in emails:
+            print(f"  {records[s]['name'][:30]:<30} {records[s]['email']}")
+        for lt in ready:
+            print(f"  {lt['slug'][:30]:<30} {lt['to_addr']}  ({lt['kind']})")
+        print(f"\n{count} letters are ready. Letter preview: uv run art15 show {(emails or [lt['slug'] for lt in ready])[0]}")
+        print(f"They go from {ctx.me}, about one every {PAUSE} seconds.\n")
+        try:
+            answer = input(f'Type "send {count}" to confirm: ')
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer.strip() != f"send {count}":
+            print("Nothing sent.")
+            imap.logout()
+            return
+    for lt in ready:
+        mail.drop_draft(imap, lt["msgid"])
+    imap.logout()
+    for slug in new:
+        new_request(ctx, slug, None)
+    todo = unsent(ctx)
+    send_letters(ctx, todo)
+    if todo:
+        print(f"\n{len(todo)} sent. Run `art15 sync` once a day: it picks up replies, bounces and deadlines.")
+    if forms:
+        print(f"{forms} web forms need you: uv run art15 forms")
+
+
+def cmd_show(ctx: Ctx, args: argparse.Namespace) -> None:
+    lt = ctx.con.execute("SELECT l.* FROM letters l JOIN requests r USING (ref) WHERE r.ref = ? OR r.slug = ? ORDER BY l.id DESC",
+                         (args.key, args.key)).fetchone()
+    if lt:
+        print(f"To: {lt['to_addr'] or 'by hand'}\nSubject: {lt['subject']}\n\n{lt['body']}")
+    else:
+        new_request(ctx, args.key, None, dry_run=True, show=True)
+
+
+def cmd_forms(ctx: Ctx, args: argparse.Namespace) -> None:
+    rows = ctx.con.execute("SELECT * FROM requests WHERE status = 'manual' ORDER BY slug").fetchall()
+    for r in rows:
+        print(f"{r['slug']:<28} {hand_address(ctx.companies.records.get(r['slug'], {}))}")
+        print(f"{'':<6}letter: data/letters/{r['ref']}-{r['slug']}.txt, then `art15 mark {r['ref']} sent`")
+    if not rows:
+        print("No web forms waiting.")
 
 
 # ---------- sync ----------
@@ -475,17 +680,7 @@ def is_bulk(msg: Message) -> bool:
 def cmd_sync(ctx: Ctx, args: argparse.Namespace) -> None:
     imap = ctx.imap()
     # 1. Which of our drafts did the user send?
-    for lt in ctx.con.execute("SELECT * FROM letters WHERE sent_at IS NULL AND to_addr != ''").fetchall():
-        for msg in mail.messages(imap, r"\Sent", "SUBJECT", lt["ref"]):
-            if " ".join(mail.header(msg, "Subject").split()) == " ".join(lt["subject"].split()):
-                sent = (mail.msg_date(msg) or datetime.now()).date().isoformat()
-                ctx.con.execute("UPDATE letters SET sent_at = ? WHERE id = ?", (sent, lt["id"]))
-                ctx.con.commit()
-                if lt["kind"] == "request":
-                    db.set_status(ctx.con, lt["ref"], "sent", sent_at=sent,
-                                  deadline=request_deadline(date.fromisoformat(sent)).isoformat())
-                print(f"{lt['ref']}: {lt['kind']} sent {sent}")
-                break
+    mark_sent(ctx, imap)
 
     # 2. Replies from companies with an open request.
     me = ctx.me.lower()
@@ -528,6 +723,8 @@ def cmd_sync(ctx: Ctx, args: argparse.Namespace) -> None:
     imap.logout()
     report.build(ctx.con, ctx.companies, DATA / "report", ctx.today)
     print(f"report: {(DATA / 'report' / 'index.html').relative_to(HOME)}")
+    if ready := unsent(ctx):
+        print(f"{len(ready)} letters ready: uv run art15 send")
 
 
 def deadlines(ctx: Ctx, imap: imaplib.IMAP4 | None) -> None:
@@ -775,6 +972,13 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="art15", description="Get your data back from companies (GDPR Art. 15).")
     p.add_argument("--now", type=date.fromisoformat, help="pretend today is this date (YYYY-MM-DD), for dry runs")
     sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("start", help="the first run: setup, scan and find, in one command").set_defaults(fn=cmd_start)
+    sub.add_parser("review", help="tick who gets a request").set_defaults(fn=cmd_review)
+    sub.add_parser("send", help="send what you ticked and any reminders, after you type the confirmation").set_defaults(fn=cmd_send)
+    s = sub.add_parser("show", help="read a letter before it goes")
+    s.add_argument("key", help="request ref or company slug")
+    s.set_defaults(fn=cmd_show)
+    sub.add_parser("forms", help="web forms waiting for you").set_defaults(fn=cmd_forms)
     sub.add_parser("setup", help="get company data, check mail login and models").set_defaults(fn=cmd_setup)
     s = sub.add_parser("scan", help="find companies in your mail (headers only)")
     s.add_argument("--limit", type=int, default=40)

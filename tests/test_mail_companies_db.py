@@ -70,11 +70,16 @@ def test_classify_needs_a_real_quote() -> None:
     assert made_up.label == "other"
 
 
-def test_draft_has_no_send_path() -> None:
+def test_draft() -> None:
     msg = mail.draft("me@example.org", "privacy@shop.co.uk", "Subject [art15-abcd]", "Body\n", {"a.txt": "x"})
     assert msg["Message-ID"].endswith("@example.org>")
     assert [p.get_filename() for p in msg.iter_attachments()] == ["a.txt"]
-    assert not hasattr(mail, "smtplib")
+
+
+def test_one_send_path() -> None:
+    src = Path(mail.__file__).parent
+    assert [p.name for p in src.glob("*.py") if "smtplib.SMTP_SSL" in p.read_text()] == ["mail.py"]
+    assert (src / "cli.py").read_text().count("ctx.send(") == 1  # send_letters, behind the typed confirmation
 
 
 def test_transitions() -> None:
