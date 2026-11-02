@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from art15 import cli, llm, mail, ticks
+from art15 import cli, finder, llm, mail, ticks
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -391,3 +391,24 @@ def test_show_reads_a_letter_without_saving(tmp_path: Path, monkeypatch: pytest.
     assert "Ada Rossi" in capsys.readouterr().out
     con = sqlite3.connect(tmp_path / "data" / "art15.db")
     assert not con.execute("SELECT 1 FROM requests").fetchone()
+
+
+def test_find_keeps_web_forms_and_outside_firms_apart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_home(tmp_path, monkeypatch, [])
+    found = {"form-a.it": finder.Found("", "https://form-a.it/p", "q", "https://portal.onetrust.com/a"),
+             "form-b.it": finder.Found("", "https://form-b.it/p", "q", "https://portal.onetrust.com/b"),
+             "client-a.it": finder.Found("dpo@outside-firm.eu", "https://client-a.it/p", "q"),
+             "client-b.it": finder.Found("dpo@outside-firm.eu", "https://client-b.it/p", "q")}
+
+    def walk(site: str, company: str, read: Any, ask: Any, also: Any = None) -> finder.Lookup:
+        f = found[site]
+        return finder.Lookup("webform" if f.webform else "email", f, [f.url])
+
+    monkeypatch.setattr(finder, "walk", walk)
+    cli.main(["status"])
+    con = sqlite3.connect(tmp_path / "data" / "art15.db")
+    con.executemany("INSERT INTO senders VALUES (?, NULL, 3, '', '', 1, 'Order')", [(d,) for d in found])
+    con.commit()
+    cli.main(["find", "--no-llm", "--no-browser"])
+    assert sorted(r[0] for r in con.execute("SELECT slug FROM senders")) == ["client-a-it", "client-b-it", "form-a-it", "form-b-it"]
+    assert json.loads((tmp_path / "data" / "records" / "form-b-it.json").read_text())["webform"].endswith("/b")
