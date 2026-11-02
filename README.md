@@ -91,8 +91,6 @@ and a few sites block it, which art15 never tries to get around. Check every add
   never logs in or fills a form.
 - Some companies only take requests through a web form (Google, Meta): art15 gives you the link and the letter
   text, and tracks the deadline once you mark it sent.
-- `art15 send` is new. The rest of the loop has run on a real Gmail account, but `send` has only run in tests so far, so
-  send one letter to an address of your own first.
 - Sending goes through your own Gmail account, so Gmail's daily limits apply. Near-identical letters can still look like
   bulk mail: start with a small batch.
 - A complaint to an authority stays a Gmail draft, for you to read and file. Many authorities want their own form, a
