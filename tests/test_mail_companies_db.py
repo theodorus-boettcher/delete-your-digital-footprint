@@ -128,7 +128,7 @@ def test_eval_metrics() -> None:
 
 
 def test_reply_text_drops_our_own_letter() -> None:
-    gmail = reply("Here is your data.\n\nOn Sat, 31 Oct 2026 at 05:11, theodorus boettcher <\nme@gmail.com> wrote:\n> the purposes of the processing;\n")
+    gmail = reply("Here is your data.\n\nOn Sat, 31 Oct 2026 at 05:11, ada rossi <\nme@gmail.com> wrote:\n> the purposes of the processing;\n")
     assert mail.reply_text(gmail) == "Here is your data."
     italian = reply("Ecco i dati.\n\nIl giorno sab 31 ott 2026 alle 05:11 Ada <a@b.it> ha scritto:\nthe purposes of the processing;\n")
     assert mail.reply_text(italian) == "Ecco i dati."

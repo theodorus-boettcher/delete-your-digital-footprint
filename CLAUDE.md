@@ -3,7 +3,7 @@
 An agent that gets the user's personal data back from companies with GDPR Art. 15 access requests:
 it finds the companies in their mail (headers only), drafts the requests, tracks the deadlines, reads
 the replies, audits what came back (Art. 15 checklist + privacy policy vs export) and drafts the
-reminders and complaints. Portfolio project (FDE/agent lane), a new build on open data.
+reminders and complaints. A new build on open data.
 
 - Plan: `~/.claude/plans/shimmering-knitting-muffin.md` (local agent, search first). First plan, phases 0-4:
   `~/.claude/plans/peppy-inventing-valley.md`.
